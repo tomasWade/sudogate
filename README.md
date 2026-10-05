@@ -76,9 +76,12 @@ ssh client machine for review.
 
 **Review UI** — two ways, same server:
 
-- **omarchy panel** (what `make install-plugin` installs): a bar badge shows the
-  pending count and hides when idle; click to open the review card — host / user /
-  cwd / full command / countdown, password field (Enter = approve), deny button.
+- **omarchy panel** (what `make install-plugin` installs): a key badge
+  (🔑 + pending count) on the bar — urgent-red while requests wait, dimmed
+  gray (key + 0) when idle. By default the badge always occupies its slot, so
+  a glance tells you the panel is alive; set `hideWhenEmpty` to collapse it
+  while idle. Click to open the review card — host / user / cwd / full
+  command / countdown, password field (Enter = approve), deny button.
   Deadline expiry rolls the queue and clears the password field automatically.
   Upgrade anytime with `git pull && make install-plugin` (idempotent).
 - **CLI fallback** (any environment):
@@ -88,6 +91,21 @@ ssh client machine for review.
   sudogate-server review   # review the oldest: shows the command, hidden password input;
                            #   password + Enter = approve, empty Enter = deny
   ```
+
+**Panel options** — set inline on the layout entry in
+`~/.config/omarchy/shell.json`; changes apply immediately (no shell restart):
+
+```jsonc
+{ "id": "tomaswade.sudogate", "hideWhenEmpty": true, "timeoutSec": 120 }
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `hideWhenEmpty` | `false` | `false`: badge always visible (dimmed key + 0 when idle); `true`: badge hidden while the queue is empty |
+| `timeoutSec` | `120` | request deadline driving the countdown; keep in sync with the server's `-timeout` |
+| `runtimeDir` | `""` | directory holding `sudogate.sock.ctl` / `sudogate.state`; empty = `XDG_RUNTIME_DIR` |
+| `serverBin` | `""` | `sudogate-server` path used for approve/deny; empty = auto-detect (`~/.local/bin` first) |
+| `demo` | `false` | render canned requests (no server needed) for previewing the visuals |
 
 ### Architecture
 
@@ -217,9 +235,11 @@ sudogate-client test   # 打印内嵌公钥指纹
 
 **审阅界面** —— 两种方式，同一个 server：
 
-- **omarchy 面板**（`make install-plugin` 安装）：状态栏显示待批数徽标，
-  空闲时隐藏；点击展开审阅卡——主机/用户/目录/完整命令/倒计时，密码框
-  （回车 = 批准）与拒绝按钮。到期请求自动滚动并清空密码框。随时
+- **omarchy 面板**（`make install-plugin` 安装）：状态栏钥匙徽标（🔑 + 待批数）
+  ——有待批时红色醒目，空闲时灰色暗淡（钥匙 + 0）。**默认徽标常驻栏位**，
+  一眼可见面板存活；配置 `hideWhenEmpty` 可改为空闲时完全隐藏。点击展开
+  审阅卡——主机/用户/目录/完整命令/倒计时，密码框（回车 = 批准）与拒绝
+  按钮。到期请求自动滚动并清空密码框。随时
   `git pull && make install-plugin` 升级（幂等安装）。
 - **CLI 兜底**（任意环境）：
 
@@ -228,6 +248,21 @@ sudogate-client test   # 打印内嵌公钥指纹
   sudogate-server review   # 审阅最旧一条：显示命令，隐藏输入密码；
                            #   输密码回车 = 批准，直接回车 = 拒绝
   ```
+
+**面板配置** —— 写在 `~/.config/omarchy/shell.json` 布局条目上，改动即时
+生效（无需重启 shell）：
+
+```jsonc
+{ "id": "tomaswade.sudogate", "hideWhenEmpty": true, "timeoutSec": 120 }
+```
+
+| 选项 | 默认 | 含义 |
+|---|---|---|
+| `hideWhenEmpty` | `false` | `false`：徽标常显（空闲时灰钥匙 + 0）；`true`：队列空时徽标完全隐藏 |
+| `timeoutSec` | `120` | 每请求等待上限，驱动倒计时显示；与 server 的 `-timeout` 保持一致 |
+| `runtimeDir` | `""` | `sudogate.sock.ctl` / `sudogate.state` 所在目录；空 = `XDG_RUNTIME_DIR` |
+| `serverBin` | `""` | 批准/拒绝调用的 `sudogate-server` 路径；空 = 自动探测（优先 `~/.local/bin`） |
+| `demo` | `false` | 用假数据渲染（无需 server），预览视觉用 |
 
 ### 架构
 

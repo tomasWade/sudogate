@@ -5,14 +5,14 @@
   "version": "0.1.0",
   "author": "tomasWade",
   "license": "MIT",
-  "description": "SudoGate review panel: pending sudo-elevation badge on the bar, click to review host/user/cwd/command and hand-enter the password. Hidden while nothing is pending. Companion UI for sudogate-server.",
+  "description": "SudoGate review panel: sudo-elevation badge on the bar (key + count, dimmed at zero), click to review host/user/cwd/command and hand-enter the password. Companion UI for sudogate-server.",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "omarchy/BarWidget.qml"
   },
   "barWidget": {
     "displayName": "SudoGate",
-    "description": "Pending sudo review badge; hidden when nothing is pending. Click to review and approve.",
+    "description": "Sudo review badge: key + pending count, dimmed when idle. Click to review and approve.",
     "category": "Status",
     "aliases": ["sudogate"],
     "allowMultiple": false,
@@ -21,7 +21,8 @@
       "runtimeDir": "",
       "serverBin": "",
       "timeoutSec": 120,
-      "demo": false
+      "demo": false,
+      "hideWhenEmpty": false
     },
     "schema": [
       {
@@ -54,6 +55,13 @@
         "label": "Demo data",
         "defaultValue": false,
         "description": "Render canned pending requests (no server needed) for previewing the visuals."
+      },
+      {
+        "key": "hideWhenEmpty",
+        "type": "boolean",
+        "label": "Hide when nothing pending",
+        "defaultValue": false,
+        "description": "Default shows the badge at all times (dimmed key + 0 when idle) so the plugin slot and server health stay visible. Turn on to collapse the badge completely while the queue is empty."
       }
     ]
   }

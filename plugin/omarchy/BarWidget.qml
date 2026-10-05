@@ -87,9 +87,20 @@ BarWidget {
     if (button !== Qt.RightButton) root.togglePanel()
   }
 
-  visible: pendingCount > 0
+  // Default: the badge always occupies its bar slot (dimmed key + 0 when
+  // idle) so the plugin presence — and with it the expectation of a working
+  // server — stays visible. hideWhenEmpty: true collapses it whenever the
+  // queue is empty.
+  readonly property bool hideWhenEmpty: setting("hideWhenEmpty", false) === true
+
+  visible: !hideWhenEmpty || pendingCount > 0
   implicitWidth: badgeRow.implicitWidth + Style.space(12)
   implicitHeight: barSize
+
+  readonly property color badgeColor: pendingCount > 0
+    ? (root.bar ? root.bar.urgent : Color.urgent)
+    : (root.bar ? root.bar.barForeground : Color.foreground)
+  readonly property real badgeOpacity: pendingCount > 0 ? 1 : 0.45
 
   Item {
     id: badgeHost
@@ -102,18 +113,23 @@ BarWidget {
       anchors.centerIn: parent
       spacing: Style.space(5)
 
+      // Nerd Font key glyph (Font Awesome range, same source as the built-in
+      // bar widgets' icons — NF is an omarchy hard dependency, so the glyph
+      // renders everywhere this plugin can run). Full name lives in the
+      // tooltip.
       Text {
-        text: "sudo"
-        color: root.bar ? root.bar.urgent : Color.urgent
+        text: "\uf084"
+        color: root.badgeColor
+        opacity: root.badgeOpacity
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
-        font.pixelSize: Style.font.caption
-        font.bold: true
+        font.pixelSize: Style.font.icon
         anchors.verticalCenter: parent.verticalCenter
       }
 
       Text {
         text: String(root.pendingCount)
-        color: root.bar ? root.bar.urgent : Color.urgent
+        color: root.badgeColor
+        opacity: root.badgeOpacity
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.body
         font.bold: true
