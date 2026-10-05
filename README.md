@@ -1,15 +1,10 @@
 # SudoGate
 
 **Reverse askpass** — sudo password prompts from remote AI agents, delivered to the machine you're sitting at.
-**反向 askpass** — 远程主机上 AI agent 的 sudo 密码框，弹回你面前这台机器。
 
-[English](#english) · [中文](#中文)
+[English](README.md) · [简体中文](README.zh-CN.md)
 
----
-
-## English
-
-### Why
+## Why
 
 Running a coding agent (opencode, Claude Code, codex, ...) on a remote host means it
 will eventually need `sudo`. The usual options are all bad:
@@ -23,7 +18,7 @@ prompt travels back **through the ssh session you already have open** to your ss
 client machine. Every elevation is read and approved by a human; the password is
 typed fresh each time and never stored on either machine.
 
-### Features
+## Features
 
 - Human in the loop, per command — one review per elevation; deny stops it instantly
 - Zero password persistence — nothing at rest on either end
@@ -38,7 +33,7 @@ typed fresh each time and never stored on either machine.
 - Pairs with your agent's own gate — e.g. opencode's `"*sudo*": "ask"` rule,
   giving two independent approvals per command
 
-### Quick Start
+## Quick Start
 
 Requirements: Go ≥ 1.24, make, openssl; traditional sudo (sudo-rs has no askpass support).
 
@@ -67,7 +62,9 @@ On each **remote host** (the machines agents run on):
 
 ```bash
 make install-client    # askpass binary to ~/.local/bin
+# interactive shells:
 echo 'export SUDO_ASKPASS=$HOME/.local/bin/sudogate-client' >> ~/.profile
+# agent (non-interactive) inheritance needs more — see "Working with agents"
 sudogate-client test   # prints the embedded pubkey fingerprint
 ```
 
@@ -107,7 +104,87 @@ ssh client machine for review.
 | `serverBin` | `""` | `sudogate-server` path used for approve/deny; empty = auto-detect (`~/.local/bin` first) |
 | `demo` | `false` | render canned requests (no server needed) for previewing the visuals |
 
-### Architecture
+## Working with agents
+
+SudoGate is the **second** of two gates. The first lives in your agent's own
+permission config; together they give every elevation two independent human
+approvals.
+
+**Gate 1 — the agent asks before running sudo.** For opencode:
+
+```jsonc
+// ~/.config/opencode/opencode.json
+{
+  "permission": {
+    "bash": {
+      "*sudo*": "ask"
+    }
+  }
+}
+```
+
+Claude Code and codex have equivalents; anything that can require human
+confirmation for `sudo` commands works as Gate 1.
+
+**Gate 2 — SudoGate asks before the password travels.** The full flow:
+
+```
+agent wants root
+  → Gate 1: agent tool asks "run sudo -A …?" — you approve the intent
+  → agent runs sudo -A <cmd>
+  → sudogate-client forwards the request over your ssh session
+  → Gate 2: the key badge on your bar turns red; open the panel and
+    read host / user / cwd / full command
+  → command matches what Gate 1 just showed? type the password (Enter).
+    Anything else — deny.
+  → sudo runs (or aborts); the agent sees only the exit code
+```
+
+The review discipline that makes phishing hard: **approve only requests whose
+command matches what Gate 1 just approved**. A command you never sanctioned,
+a host you have no session into — deny.
+
+**Wiring the agent's environment.** `sudo` reads `SUDO_ASKPASS` from its own
+environment, inherited from the agent process. Agent shells are
+non-interactive: they read **no rc files**, so the `~/.profile` export from
+Quick Start only covers interactive sessions. The variable has to be in the
+agent process environment:
+
+- Agent started from an interactive shell — it inherits that shell's
+  environment. Put the export **before** the interactivity guard in
+  `~/.bashrc` (or in `~/.zshenv` for zsh) so every child gets it:
+
+  ```bash
+  # first line of ~/.bashrc — BEFORE the "case $- in *i*)" guard
+  export SUDO_ASKPASS=$HOME/.local/bin/sudogate-client
+  ```
+
+- Agent started by systemd (or any supervisor) — set it in the unit:
+
+  ```ini
+  [Service]
+  Environment=SUDO_ASKPASS=%h/.local/bin/sudogate-client
+  ```
+
+Verify from the agent's own shell tool:
+
+```bash
+echo "${SUDO_ASKPASS:-MISSING}"
+```
+
+**What the agent experiences** — `sudo -A` blocks until a decision:
+
+| Operator action      | Agent sees                            |
+|----------------------|---------------------------------------|
+| Password entered     | command runs as root, normal exit     |
+| Deny                 | exit 1, askpass error on stderr       |
+| Timeout (default 120s) | exit 1, timeout error on stderr     |
+
+The wait is a human reading the command — agents should treat blocking as
+normal and not retry-loop a pending request (identical concurrent commands
+are merged into one review anyway).
+
+## Architecture
 
 ```
 remote host (agent)                    ssh client machine (operator)
@@ -141,7 +218,7 @@ sudo -A <cmd>
   prompts). Same-uid DoS is unavoidable. A compromised ssh client machine is game
   over (it holds the private key).
 
-### Behavior (measured)
+## Behavior (measured)
 
 | Your action          | Dialogs           | Result                          |
 |----------------------|-------------------|---------------------------------|
@@ -153,7 +230,28 @@ sudo -A <cmd>
 Concurrent requests are sealed and decided independently; identical concurrent
 commands are merged into one review.
 
-### References
+## Troubleshooting
+
+- **`sudo: no askpass program specified`** — `SUDO_ASKPASS` never reached the
+  sudo process. Agent shells are non-interactive and read no rc files; see
+  [Working with agents](#working-with-agents) for the environment chain.
+- **`remote port forwarding failed for listen path …`** — a stale
+  `/run/user/1000/sudogate.sock` (left behind by a dropped session) blocks the
+  forward, and `ExitOnForwardFailure` then drops the connection. Clear it with
+  a forwarding-free one-liner:
+
+  ```bash
+  ssh -o ClearAllForwardings=yes minipc 'rm -f /run/user/1000/sudogate.sock'
+  ```
+
+- **`sudo -A` fails while you're away** — that is the design
+  (disconnected = denied); the bridge only exists inside your live ssh session.
+- **sudo-rs** — does not support askpass at all; use traditional sudo
+  (`sudo` from sudo.ws).
+- **`sudo -n true` still asks for a password** — correct: SudoGate deliberately
+  adds no password-less path. There is nothing to configure in sudoers.
+
+## References
 
 - [lllamnyp/askpass](https://github.com/lllamnyp/askpass) — same pattern over mTLS
 - [OzoneAsai/remote-askpass](https://github.com/OzoneAsai/remote-askpass) — Windows agent variant
@@ -161,159 +259,6 @@ commands are merged into one review.
 - [0xMH/sudo-mcp](https://github.com/0xMH/sudo-mcp) — MCP tool popping a local OS dialog (agent and human on the same machine)
 - [hughesjs/sudo-mcp](https://github.com/hughesjs/sudo-mcp) — MCP + polkit/pkexec (needs a local desktop session)
 
-### License
-
-[MIT](LICENSE) — Copyright (c) 2026 tomasWade
-
----
-
-## 中文
-
-### 为什么
-
-在远程主机上跑 coding agent（opencode / Claude Code / codex……）迟早要 `sudo`。
-常见选择都不理想：
-
-- **sudoers 免密** —— agent 跑的一切代码从此握着 root
-- **把密码贴进对话** —— 密码进入模型上下文与转录
-- **转发 GUI 弹窗** —— 依赖转发显示，headless 主机不可用
-
-SudoGate 换了一条路：agent 照常 `sudo -A`，密码框沿着**你已经开着的 ssh 会话**
-弹回你的 ssh 客户端机器。每次提权都由人读命令、人输密码；密码每次现输，
-两端零落盘。
-
-### 特性
-
-- 每命令人在环上 —— 一次提权一次审阅，拒绝即刻终止
-- 密码零落盘 —— 两端不存储任何凭据
-- 不新增信任面 —— 通道即 ssh `-R` unix socket 反向转发，认证与加密由 ssh
-  自带；不开端口、不配证书
-- 密钥编译期拆分 —— server 二进制内嵌私钥、client 内嵌公钥，代码中不存在
-  密钥生成路径
-- 结构性防篡改 —— 每请求 X25519 一次性密封 + Ed25519 签名 + 一次性 id 与
-  命令哈希绑定
-- 断线即拒绝 —— ssh 不在线，远程 `sudo -A` 直接失败
-- 审计 —— 每次决断记 JSONL
-- 与 agent 自身闸门组合 —— 如 opencode 的 `"*sudo*": "ask"`，每条命令两道
-  独立审批
-
-### 快速开始
-
-依赖：Go ≥ 1.24、make、openssl；传统 sudo（sudo-rs 不支持 askpass）。
-
-一次性生成密钥对（任意第三方工具），带外保管——仓库永不存密钥，每台
-参与构建的机器使用同一对：
-
-```bash
-mkdir -p keys
-openssl genpkey -algorithm ed25519 -out keys/laptop.key
-openssl pkey -in keys/laptop.key -pubout -out keys/laptop.pub
-```
-
-**ssh 客户端机器**（你发起 ssh 的那台）：
-
-```bash
-make install-server    # 构建 + ~/.local/bin + systemd --user 服务
-make install-plugin    # omarchy 审阅面板（可选，推荐）
-
-# ~/.ssh/config:
-Host minipc
-    RemoteForward /run/user/1000/sudogate.sock /run/user/1000/sudogate.sock
-    ExitOnForwardFailure yes
-```
-
-**远程主机**（agent 跑的那些机器）：
-
-```bash
-make install-client    # askpass 二进制装入 ~/.local/bin
-echo 'export SUDO_ASKPASS=$HOME/.local/bin/sudogate-client' >> ~/.profile
-sudogate-client test   # 打印内嵌公钥指纹
-```
-
-之后在 agent 或 shell 里：`sudo -A <命令>` —— 请求出现在 ssh 客户端机器上
-等待审阅。
-
-**审阅界面** —— 两种方式，同一个 server：
-
-- **omarchy 面板**（`make install-plugin` 安装）：状态栏钥匙徽标（🔑 + 待批数）
-  ——有待批时红色醒目，空闲时灰色暗淡（钥匙 + 0）。**默认徽标常驻栏位**，
-  一眼可见面板存活；配置 `hideWhenEmpty` 可改为空闲时完全隐藏。点击展开
-  审阅卡——主机/用户/目录/完整命令/倒计时，密码框（回车 = 批准）与拒绝
-  按钮。到期请求自动滚动并清空密码框。随时
-  `git pull && make install-plugin` 升级（幂等安装）。
-- **CLI 兜底**（任意环境）：
-
-  ```bash
-  sudogate-server status   # 查看待批
-  sudogate-server review   # 审阅最旧一条：显示命令，隐藏输入密码；
-                           #   输密码回车 = 批准，直接回车 = 拒绝
-  ```
-
-**面板配置** —— 写在 `~/.config/omarchy/shell.json` 布局条目上，改动即时
-生效（无需重启 shell）：
-
-```jsonc
-{ "id": "tomaswade.sudogate", "hideWhenEmpty": true, "timeoutSec": 120 }
-```
-
-| 选项 | 默认 | 含义 |
-|---|---|---|
-| `hideWhenEmpty` | `false` | `false`：徽标常显（空闲时灰钥匙 + 0）；`true`：队列空时徽标完全隐藏 |
-| `timeoutSec` | `120` | 每请求等待上限，驱动倒计时显示；与 server 的 `-timeout` 保持一致 |
-| `runtimeDir` | `""` | `sudogate.sock.ctl` / `sudogate.state` 所在目录；空 = `XDG_RUNTIME_DIR` |
-| `serverBin` | `""` | 批准/拒绝调用的 `sudogate-server` 路径；空 = 自动探测（优先 `~/.local/bin`） |
-| `demo` | `false` | 用假数据渲染（无需 server），预览视觉用 |
-
-### 架构
-
-```
-远程主机（agent）                     ssh 客户端机器（操作者）
-───────────────                      ──────────────────────
-sudo -A <cmd>
- └─ sudogate-client（= SUDO_ASKPASS）
-     · ps 取证真实命令
-     · 一次性 X25519 密钥对
-          │ ── ssh -R unix socket ──▶ sudogate-server（systemd --user）
-          │    请求 {命令, id, 公钥}          │ 审阅 UI：omarchy 面板或 CLI
-          │                                  │ 操作者输入密码
-          ◀─ 密封密码 + 签名 ────────────────┘
- └─ 验签（编译内嵌公钥）
-     一次性密钥解封 → stdout → sudo
-```
-
-- **组件** —— `sudogate-server`（ssh 客户端机器）：监听由各远程主机转发来
-  的 unix socket，排队请求、密封签名响应；以 systemd --user 服务常驻；内嵌
-  私钥。`sudogate-client`（远程主机）：askpass helper；内嵌公钥、别无秘密，
-  由 sudo 按需调起、跑完即退，可复制到任意多台主机。`plugin/`（ssh 客户端
-  机器）：omarchy quickshell 审阅面板——inotify 监听 server 状态文件（零轮询），
-  经 server 控制子命令批准/拒绝，密码走 stdin。
-- **信任与密码学** —— 传输层认证/加密继承自 ssh；响应来源由 Ed25519 对
-  `id ‖ SHA256(命令) ‖ SHA256(公钥)` 的签名证明，验签用编译内嵌公钥；密码以
-  XChaCha20-Poly1305 在 X25519/HKDF 密钥下密封，只有等待中的 askpass 进程
-  能打开。
-- **已知边界** —— 远程主机上同 uid 代码可自行提交请求（钓鱼级；防线是人读
-  命令，与本地桌面弹框同级）；同 uid DoS 不可避免；ssh 客户端机器失陷即
-  全盘失陷（私钥在此）。
-
-### 行为（实测）
-
-| 你的操作     | 弹框            | 结果                     |
-|--------------|-----------------|--------------------------|
-| 输对密码     | 1 次            | 以 root 执行             |
-| 输错密码     | 至多 3 次       | sudo 放弃                |
-| 直接拒绝     | 仅 1 次         | 立即终止                 |
-| 空输入       | 仅 1 次         | 视为拒绝                 |
-
-并发请求各自独立密封与决断；相同的并发命令自动合并为一次审阅。
-
-### 参考
-
-- [lllamnyp/askpass](https://github.com/lllamnyp/askpass) —— 同模式，mTLS 传输
-- [OzoneAsai/remote-askpass](https://github.com/OzoneAsai/remote-askpass) —— Windows 侧变体
-- [crypdick/sudoplz](https://github.com/crypdick/sudoplz) —— SSH 密钥加密存储型 askpass
-- [0xMH/sudo-mcp](https://github.com/0xMH/sudo-mcp) —— MCP 工具弹本机 OS 密码框（agent 与人须同机）
-- [hughesjs/sudo-mcp](https://github.com/hughesjs/sudo-mcp) —— MCP + polkit/pkexec（依赖本机桌面会话）
-
-### 许可证
+## License
 
 [MIT](LICENSE) — Copyright (c) 2026 tomasWade
