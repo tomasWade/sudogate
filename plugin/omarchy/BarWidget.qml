@@ -3,10 +3,12 @@ import QtQuick
 import qs.Ui
 import qs.Commons
 
-// Bar entry point: the pending-review badge. Nothing renders while the queue
-// is empty — a silent bar is the "no requests" state the owner asked for. All
-// state and process plumbing live in Panel.qml, loaded once here; the badge
-// just mirrors its count.
+// Bar entry point: the pending-review badge. By default the badge always
+// occupies its bar slot (dimmed key + 0 when idle) so the plugin presence —
+// and with it the expectation of a working server — stays visible;
+// hideWhenEmpty: true restores the silent-bar "no requests" state. All state
+// and process plumbing live in Panel.qml, loaded once here; the badge just
+// mirrors its count.
 BarWidget {
   id: root
   moduleName: "tomaswade.sudogate"
@@ -107,6 +109,9 @@ BarWidget {
     anchors.centerIn: parent
     width: badgeRow.implicitWidth
     height: badgeRow.implicitHeight
+    // Idle/urgent dimming animates on the host so the glyph and count fade
+    // together; the Texts below stay at full opacity.
+    opacity: root.badgeOpacity
 
     Row {
       id: badgeRow
@@ -120,7 +125,6 @@ BarWidget {
       Text {
         text: "\uf084"
         color: root.badgeColor
-        opacity: root.badgeOpacity
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.icon
         anchors.verticalCenter: parent.verticalCenter
@@ -129,7 +133,6 @@ BarWidget {
       Text {
         text: String(root.pendingCount)
         color: root.badgeColor
-        opacity: root.badgeOpacity
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.body
         font.bold: true
