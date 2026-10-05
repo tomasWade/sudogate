@@ -1,0 +1,10 @@
+[Unit]
+Description=SudoGate review server (ssh client side)
+Documentation=https://github.com/tomasWade/sudogate
+
+[Service]
+ExecStart=%h/.local/bin/sudogate-server serve
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

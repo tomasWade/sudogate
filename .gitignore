@@ -1,0 +1,4 @@
+keys/
+build/
+cmd/sudogate-server/laptop.key
+cmd/sudogate-client/laptop.pub

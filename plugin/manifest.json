@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "id": "tomaswade.sudogate",
+  "name": "SudoGate",
+  "version": "0.1.0",
+  "author": "tomasWade",
+  "license": "MIT",
+  "description": "SudoGate review panel: pending sudo-elevation badge on the bar, click to review host/user/cwd/command and hand-enter the password. Hidden while nothing is pending. Companion UI for sudogate-server.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "omarchy/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "SudoGate",
+    "description": "Pending sudo review badge; hidden when nothing is pending. Click to review and approve.",
+    "category": "Status",
+    "aliases": ["sudogate"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "runtimeDir": "",
+      "serverBin": "",
+      "timeoutSec": 120,
+      "demo": false
+    },
+    "schema": [
+      {
+        "key": "runtimeDir",
+        "type": "string",
+        "label": "Runtime dir",
+        "defaultValue": "",
+        "description": "Directory holding sudogate.sock.ctl and sudogate.state. Empty = XDG_RUNTIME_DIR."
+      },
+      {
+        "key": "serverBin",
+        "type": "string",
+        "label": "sudogate-server path",
+        "defaultValue": "",
+        "description": "Path to the sudogate-server binary (approve/deny subcommands). Empty = auto-detect (~/.local/bin, then the dev build location)."
+      },
+      {
+        "key": "timeoutSec",
+        "type": "integer",
+        "label": "Request deadline (seconds)",
+        "min": 10,
+        "max": 600,
+        "step": 10,
+        "defaultValue": 120,
+        "description": "Per-request wait timeout the server is running with; drives the countdown display. Must match the server's -timeout."
+      },
+      {
+        "key": "demo",
+        "type": "boolean",
+        "label": "Demo data",
+        "defaultValue": false,
+        "description": "Render canned pending requests (no server needed) for previewing the visuals."
+      }
+    ]
+  }
+}
