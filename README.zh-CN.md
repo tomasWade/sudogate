@@ -1,12 +1,12 @@
 # SudoGate
 
-**反向 askpass** —— 远程主机上 AI agent 的 sudo 密码框，弹回你面前这台机器。
+**反向 askpass** —— ssh 服务器上 AI agent 的 sudo 密码框，弹回你面前这台机器。
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 ## 为什么
 
-在远程主机上跑 coding agent（opencode / Claude Code / codex……）迟早要 `sudo`。
+在 ssh 服务器上跑 coding agent（opencode / Claude Code / codex……）迟早要 `sudo`。
 常见选择都不理想：
 
 - **sudoers 免密** —— agent 跑的一切代码从此握着 root
@@ -14,7 +14,7 @@
 - **转发 GUI 弹窗** —— 依赖转发显示，headless 主机不可用
 
 SudoGate 换了一条路：agent 照常 `sudo -A`，密码框沿着**你已经开着的 ssh 会话**
-弹回你的 ssh 客户端机器。每次提权都由人读命令、人输密码；密码每次现输，
+弹回你的 ssh 客户端。每次提权都由人读命令、人输密码；密码每次现输，
 两端零落盘。
 
 ## 特性
@@ -34,7 +34,15 @@ SudoGate 换了一条路：agent 照常 `sudo -A`，密码框沿着**你已经�
 
 ## 快速开始
 
-依赖：Go ≥ 1.24、make、openssl；传统 sudo（sudo-rs 不支持 askpass）。
+先认清三个角色：**构建机**（有仓库和密钥，跑 `make`）、**ssh 客户端**
+（你的机器，跑 sudogate-server 和审阅界面）、**ssh 服务器**（agent 跑的
+机器，装 sudogate-client）。通常构建机就是 ssh 客户端，一台机器兼两个
+角色；只有走下面的「自建路线」时，ssh 服务器才会临时充当构建机。
+
+依赖：构建需要 Go ≥ 1.24、make、openssl；ssh 服务器走拷贝路线则零依赖；
+两端都要传统 sudo（sudo-rs 不支持 askpass）。下文命令里的 `<ssh-server>`
+指你的 ssh 服务器（`user@host` 或 ssh config 里的别名）；socket 路径里的
+`/run/user/1000/` 是 uid 1000 的写法，哪端 uid 不是 1000 就照改哪端。
 
 一次性生成密钥对（任意第三方工具），带外保管——仓库永不存密钥，每台
 参与构建的机器使用同一对：
@@ -45,30 +53,60 @@ openssl genpkey -algorithm ed25519 -out keys/laptop.key
 openssl pkey -in keys/laptop.key -pubout -out keys/laptop.pub
 ```
 
-**ssh 客户端机器**（你发起 ssh 的那台）：
+**ssh 客户端**（你面前的机器）：
 
 ```bash
 make install-server    # 构建 + ~/.local/bin + systemd --user 服务
 make install-plugin    # omarchy 审阅面板（可选，推荐）
 
 # ~/.ssh/config:
-Host minipc
+Host <ssh-server>
     RemoteForward /run/user/1000/sudogate.sock /run/user/1000/sudogate.sock
+    # yes = 转发失败立即断连（fail loud）；与其它会话/多路复用器并存时用 no，
+    # 代价仅是转发静默缺失——远程 sudo -A 会第一时间报出来
     ExitOnForwardFailure yes
 ```
 
-**远程主机**（agent 跑的那些机器）：
+**ssh 服务器**（agent 跑的那些机器）——装 client 两条路线：
 
 ```bash
-make install-client    # askpass 二进制装入 ~/.local/bin
+# 拷贝路线（推荐）：make install-server 时 client 已一并构建，在 ssh
+# 客户端上执行即可（Go 静态二进制，ssh 服务器零依赖）：
+ssh <ssh-server> 'mkdir -p ~/.local/bin'
+scp build/sudogate-client <ssh-server>:.local/bin/
+```
+
+```bash
+# 自建路线：ssh 服务器 clone 仓库并放入同一对密钥后 make（注意 inject
+# 需要私钥在场——无必要时别让私钥多跑一台机器）
+make install-client
+```
+
+无论哪条路线，在 ssh 服务器上收尾：
+
+```bash
 # 交互 shell：
 echo 'export SUDO_ASKPASS=$HOME/.local/bin/sudogate-client' >> ~/.profile
 # agent（非交互）环境继承需另配 —— 见「与 agent 协作」
-sudogate-client test   # 打印内嵌公钥指纹
 ```
 
-之后在 agent 或 shell 里：`sudo -A <命令>` —— 请求出现在 ssh 客户端机器上
-等待审阅。
+**ssh 服务器的 sshd 一次性配置（root）**：sshd 默认在会话断开后不清理
+socket 文件（正常退出也留），残留文件会堵死下一条连接的转发。让新会话
+绑定前自动清掉旧文件：
+
+```bash
+echo 'StreamLocalBindUnlink yes' | sudo tee /etc/ssh/sshd_config.d/99-sudogate.conf
+sudo systemctl restart ssh    # Debian/Ubuntu；其它发行版服务名可能是 sshd
+```
+
+之后连上 ssh，先自检再实战：
+
+```bash
+# ssh 服务器上（转发已随连接建立）：
+sudogate-client test   # 端到端自检：ssh 客户端弹出
+                       # 「sudogate-client self-test」的审阅请求即链路通
+sudo -A <命令>         # 实战
+```
 
 **审阅界面** —— 两种方式，同一个 server：
 
@@ -100,6 +138,44 @@ sudogate-client test   # 打印内嵌公钥指纹
 | `runtimeDir` | `""` | `sudogate.sock.ctl` / `sudogate.state` 所在目录；空 = `XDG_RUNTIME_DIR` |
 | `serverBin` | `""` | 批准/拒绝调用的 `sudogate-server` 路径；空 = 自动探测（优先 `~/.local/bin`） |
 | `demo` | `false` | 用假数据渲染（无需 server），预览视觉用 |
+
+## 端到端示例（laptop → minipc）
+
+具体机器名登场：`laptop` 兼任构建机与 ssh 客户端，`minipc` 是 ssh 服务器
+（IP 192.168.1.50，uid 1000）。从零到弹窗走一遍：
+
+```bash
+# laptop：生成密钥对、make install-server（见上文），随后把 client 送过去
+ssh minipc 'mkdir -p ~/.local/bin'
+scp build/sudogate-client minipc:.local/bin/
+```
+
+```bash
+# minipc：导出 askpass（交互 shell）
+echo 'export SUDO_ASKPASS=$HOME/.local/bin/sudogate-client' >> ~/.profile
+```
+
+```bash
+# minipc（root，一次性）：允许新会话清掉残留 socket
+echo 'StreamLocalBindUnlink yes' | sudo tee /etc/ssh/sshd_config.d/99-sudogate.conf
+sudo systemctl restart ssh
+```
+
+```bash
+# laptop：~/.ssh/config
+Host minipc
+    HostName 192.168.1.50
+    RemoteForward /run/user/1000/sudogate.sock /run/user/1000/sudogate.sock
+    ExitOnForwardFailure yes
+```
+
+连上后，在 minipc 的会话里：
+
+```bash
+sudogate-client test    # 自检：laptop 弹出「sudogate-client self-test」
+                        # 审阅请求，说明桥已通
+sudo -A whoami          # 实战：读命令 → 输密码 → root
+```
 
 ## 与 agent 协作
 
@@ -174,10 +250,41 @@ echo "${SUDO_ASKPASS:-MISSING}"
 等待 = 有个人正在读你的命令——agent 应把阻塞当作正常现象，不要对未决请求
 重试轰炸（相同的并发命令本来就会合并为一次审阅）。
 
+## 当 ssh 由 herdr 这类工具代发时
+
+`RemoteForward` 只对真正读了 `~/.ssh/config` 的那条 ssh 连接生效。herdr、
+VS Code Remote 这类工具连远程时往往自己起 ssh、用自己生成的配置，你的
+`~/.ssh/config` 它们不读。于是 agent 跑得好好的，`sudo -A` 却连不上：桥
+压根没搭在你以为的那条连接上。
+
+修法是让工具直接用你的 `~/.ssh/config`。herdr 的开关是：
+
+```toml
+# ~/.config/herdr/config.toml
+[remote]
+manage_ssh_config = false    # 不用生成配置，按用户的 ~/.ssh/config 连
+```
+
+还有一个容易踩的坑：herdr 连机器时用的是注册时保存的 `user@IP`，不是
+`Host` 后面的别名。别名和实际目标要写在同一行，否则匹配不上：
+
+```bash
+# <alias> = 你起的别名；<target> = herdr 注册表里存的 IP / 主机名
+Host <alias> <target>
+    RemoteForward /run/user/1000/sudogate.sock /run/user/1000/sudogate.sock
+    ExitOnForwardFailure no
+```
+
+配好之后，桥跟着 herdr 的连接走：它连上桥就在，它断开桥就没了（远程
+`sudo -A` 立刻失败，符合「断线即拒」）。这时你再手动 `ssh <alias>` 也不
+冲突：后连的一方顶掉 ssh 服务器上的 socket，先连的一方照常在线，两条隧道
+通向同一个 sudogate-server，谁持有都一样。这个并存行为依赖 ssh 服务器的
+`StreamLocalBindUnlink yes`（见快速开始）和 `ExitOnForwardFailure no`。
+
 ## 架构
 
 ```
-远程主机（agent）                     ssh 客户端机器（操作者）
+ssh 服务器（agent）                      ssh 客户端（操作者）
 ───────────────                      ──────────────────────
 sudo -A <cmd>
  └─ sudogate-client（= SUDO_ASKPASS）
@@ -191,18 +298,18 @@ sudo -A <cmd>
      一次性密钥解封 → stdout → sudo
 ```
 
-- **组件** —— `sudogate-server`（ssh 客户端机器）：监听由各远程主机转发来
+- **组件** —— `sudogate-server`（ssh 客户端）：监听由各 ssh 服务器转发来
   的 unix socket，排队请求、密封签名响应；以 systemd --user 服务常驻；内嵌
-  私钥。`sudogate-client`（远程主机）：askpass helper；内嵌公钥、别无秘密，
-  由 sudo 按需调起、跑完即退，可复制到任意多台主机。`plugin/`（ssh 客户端
-  机器）：omarchy quickshell 审阅面板——inotify 监听 server 状态文件（零轮询），
+  私钥。`sudogate-client`（ssh 服务器）：askpass helper；内嵌公钥、别无秘密，
+  由 sudo 按需调起、跑完即退，可复制到任意多台主机。`plugin/`（ssh 客户端）：
+  omarchy quickshell 审阅面板——inotify 监听 server 状态文件（零轮询），
   经 server 控制子命令批准/拒绝，密码走 stdin。
 - **信任与密码学** —— 传输层认证/加密继承自 ssh；响应来源由 Ed25519 对
   `id ‖ SHA256(命令) ‖ SHA256(公钥)` 的签名证明，验签用编译内嵌公钥；密码以
   XChaCha20-Poly1305 在 X25519/HKDF 密钥下密封，只有等待中的 askpass 进程
   能打开。
-- **已知边界** —— 远程主机上同 uid 代码可自行提交请求（钓鱼级；防线是人读
-  命令，与本地桌面弹框同级）；同 uid DoS 不可避免；ssh 客户端机器失陷即
+- **已知边界** —— ssh 服务器上同 uid 代码可自行提交请求（钓鱼级；防线是人读
+  命令，与本地桌面弹框同级）；同 uid DoS 不可避免；ssh 客户端失陷即
   全盘失陷（私钥在此）。
 
 ## 行为（实测）
@@ -220,13 +327,16 @@ sudo -A <cmd>
 
 - **`sudo：没有指定 askpass 程序`** —— `SUDO_ASKPASS` 没到 sudo 进程。agent
   的 shell 非交互、不读 rc 文件；环境链条见[「与 agent 协作」](#与-agent-协作)。
-- **`remote port forwarding failed for listen path …`** —— 上次会话残留的
-  `/run/user/1000/sudogate.sock` 挡住了转发，`ExitOnForwardFailure` 随即断连。
-  用免转发的一次性命令清掉：
+- **`remote port forwarding failed for listen path …`** —— ssh 服务器的
+  sshd 默认 `StreamLocalBindUnlink no`：会话断开后 socket 文件残留（**正常
+  退出也留**），堵死下一条连接的转发；`ExitOnForwardFailure yes` 随即断连。
+  立即清：
 
   ```bash
-  ssh -o ClearAllForwardings=yes minipc 'rm -f /run/user/1000/sudogate.sock'
+  ssh -o ClearAllForwardings=yes <ssh-server> 'rm -f /run/user/1000/sudogate.sock'
   ```
+
+  一次性根治见[快速开始](#快速开始)的 `StreamLocalBindUnlink yes`。
 
 - **人不在时 `sudo -A` 失败** —— 这就是设计（断线即拒）；桥只存在于你活着
   的 ssh 会话里。

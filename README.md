@@ -1,12 +1,12 @@
 # SudoGate
 
-**Reverse askpass** — sudo password prompts from remote AI agents, delivered to the machine you're sitting at.
+**Reverse askpass** — sudo password prompts from AI agents on ssh servers, delivered to the machine you're sitting at.
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 ## Why
 
-Running a coding agent (opencode, Claude Code, codex, ...) on a remote host means it
+Running a coding agent (opencode, Claude Code, codex, ...) on an ssh server means it
 will eventually need `sudo`. The usual options are all bad:
 
 - **`NOPASSWD` sudoers** — every piece of code the agent runs now holds root
@@ -15,7 +15,7 @@ will eventually need `sudo`. The usual options are all bad:
 
 SudoGate takes another route: the agent runs plain `sudo -A`, and the password
 prompt travels back **through the ssh session you already have open** to your ssh
-client machine. Every elevation is read and approved by a human; the password is
+client. Every elevation is read and approved by a human; the password is
 typed fresh each time and never stored on either machine.
 
 ## Features
@@ -35,7 +35,17 @@ typed fresh each time and never stored on either machine.
 
 ## Quick Start
 
-Requirements: Go ≥ 1.24, make, openssl; traditional sudo (sudo-rs has no askpass support).
+Three roles first: the **build machine** (has the repo and keys, runs `make`),
+the **ssh client** (your machine, runs sudogate-server and the review UI), and
+the **ssh server** (the machine agents run on, gets sudogate-client). Usually
+the build machine and the ssh client are the same box; only the "build on the
+server" route below turns the ssh server into a build machine.
+
+Requirements: building needs Go ≥ 1.24, make, openssl; the ssh server needs
+nothing beyond traditional sudo if you copy the binary over (sudo-rs has no
+askpass support). In the commands below, `<ssh-server>` means your ssh server
+(`user@host` or its alias in ssh config); the `/run/user/1000/` in socket paths
+is the uid-1000 spelling — change it on whichever end isn't uid 1000.
 
 Generate a keypair once, with any third-party tool, and keep it out of band — the
 repo never stores keys, and every machine that builds needs the same pair:
@@ -46,30 +56,62 @@ openssl genpkey -algorithm ed25519 -out keys/laptop.key
 openssl pkey -in keys/laptop.key -pubout -out keys/laptop.pub
 ```
 
-On the **ssh client machine** (the machine you ssh from):
+On the **ssh client** (the machine in front of you):
 
 ```bash
 make install-server    # build + ~/.local/bin + systemd --user service
 make install-plugin    # omarchy review panel (optional, recommended)
 
 # ~/.ssh/config:
-Host minipc
+Host <ssh-server>
     RemoteForward /run/user/1000/sudogate.sock /run/user/1000/sudogate.sock
+    # yes = drop the connection if the forward fails (fail loud); use no when
+    # coexisting with other sessions / multiplexers — the cost is a silent
+    # missing forward, which remote sudo -A reports immediately
     ExitOnForwardFailure yes
 ```
 
-On each **remote host** (the machines agents run on):
+On each **ssh server** (the machines agents run on) — two ways to install the client:
 
 ```bash
-make install-client    # askpass binary to ~/.local/bin
+# Copy route (recommended): the client was already built by make install-server;
+# run this on the ssh client (static Go binary, zero deps on the server):
+ssh <ssh-server> 'mkdir -p ~/.local/bin'
+scp build/sudogate-client <ssh-server>:.local/bin/
+```
+
+```bash
+# Build-on-the-server route: clone the repo on the ssh server, place the same
+# keypair in keys/, then make (note that inject needs the private key present —
+# don't take the private key to more machines than necessary)
+make install-client
+```
+
+Either way, finish on the ssh server:
+
+```bash
 # interactive shells:
 echo 'export SUDO_ASKPASS=$HOME/.local/bin/sudogate-client' >> ~/.profile
 # agent (non-interactive) inheritance needs more — see "Working with agents"
-sudogate-client test   # prints the embedded pubkey fingerprint
 ```
 
-Then from an agent or a shell: `sudo -A <command>` — the request appears on your
-ssh client machine for review.
+**One-time sshd config on the ssh server (root)**: sshd does not remove the
+socket file when a session ends (even a clean exit), and the stale file blocks
+the next connection's forward. Make each new session unlink it before binding:
+
+```bash
+echo 'StreamLocalBindUnlink yes' | sudo tee /etc/ssh/sshd_config.d/99-sudogate.conf
+sudo systemctl restart ssh    # Debian/Ubuntu; other distros may call it sshd
+```
+
+Then connect over ssh, self-test, and use it for real:
+
+```bash
+# on the ssh server (the forward is up with the connection):
+sudogate-client test   # end-to-end self test: a review request reading
+                       # “sudogate-client self-test” pops up on the ssh client
+sudo -A <command>      # the real thing
+```
 
 **Review UI** — two ways, same server:
 
@@ -103,6 +145,44 @@ ssh client machine for review.
 | `runtimeDir` | `""` | directory holding `sudogate.sock.ctl` / `sudogate.state`; empty = `XDG_RUNTIME_DIR` |
 | `serverBin` | `""` | `sudogate-server` path used for approve/deny; empty = auto-detect (`~/.local/bin` first) |
 | `demo` | `false` | render canned requests (no server needed) for previewing the visuals |
+
+## Worked example (laptop → minipc)
+
+Real names now: `laptop` doubles as build machine and ssh client; `minipc` is
+the ssh server (IP 192.168.1.50, uid 1000). From zero to the first prompt:
+
+```bash
+# laptop: generate the keypair, make install-server (see above), then ship the client
+ssh minipc 'mkdir -p ~/.local/bin'
+scp build/sudogate-client minipc:.local/bin/
+```
+
+```bash
+# minipc: export the askpass (interactive shell)
+echo 'export SUDO_ASKPASS=$HOME/.local/bin/sudogate-client' >> ~/.profile
+```
+
+```bash
+# minipc (root, once): let new sessions clear a stale socket
+echo 'StreamLocalBindUnlink yes' | sudo tee /etc/ssh/sshd_config.d/99-sudogate.conf
+sudo systemctl restart ssh
+```
+
+```bash
+# laptop: ~/.ssh/config
+Host minipc
+    HostName 192.168.1.50
+    RemoteForward /run/user/1000/sudogate.sock /run/user/1000/sudogate.sock
+    ExitOnForwardFailure yes
+```
+
+Once connected, inside the session on minipc:
+
+```bash
+sudogate-client test    # self test: a “sudogate-client self-test” review
+                        # pops up on laptop — the bridge works
+sudo -A whoami          # for real: read the command → type password → root
+```
 
 ## Working with agents
 
@@ -184,11 +264,47 @@ The wait is a human reading the command — agents should treat blocking as
 normal and not retry-loop a pending request (identical concurrent commands
 are merged into one review anyway).
 
+## When a tool such as herdr runs the ssh for you
+
+`RemoteForward` only takes effect on the ssh connection that actually reads
+`~/.ssh/config`. Tools like herdr or VS Code Remote usually spawn their own ssh
+with a config they generate — your `~/.ssh/config` is never read. So the agent
+runs fine, but `sudo -A` can't connect: the bridge was never set up on the
+connection you assumed it was.
+
+The fix is to make the tool use your `~/.ssh/config`. For herdr:
+
+```toml
+# ~/.config/herdr/config.toml
+[remote]
+manage_ssh_config = false    # skip the generated config, connect per the user's ~/.ssh/config
+```
+
+One trap left: herdr connects with the `user@IP` it stored at registration
+time, not the alias after `Host`. Put both on the same line or the pattern
+won't match:
+
+```bash
+# <alias> = the alias you picked; <target> = the IP / hostname in herdr's registry
+Host <alias> <target>
+    RemoteForward /run/user/1000/sudogate.sock /run/user/1000/sudogate.sock
+    ExitOnForwardFailure no
+```
+
+With that in place the bridge follows herdr's connection: it's up while herdr
+is connected and gone when herdr disconnects (remote `sudo -A` fails
+immediately — disconnected = denied). Your manual `ssh <alias>` coexists
+fine: whoever connects later takes over the socket on the ssh server, the
+earlier connection stays online, and both tunnels end at the same
+sudogate-server, so either holder works. This coexistence relies on
+`StreamLocalBindUnlink yes` on the ssh server (see Quick Start) and
+`ExitOnForwardFailure no`.
+
 ## Architecture
 
 ```
-remote host (agent)                    ssh client machine (operator)
-───────────────────                   ─────────────────────────────
+ssh server (agent)                     ssh client (operator)
+───────────────────                    ─────────────────────
 sudo -A <cmd>
  └─ sudogate-client (= SUDO_ASKPASS)
      · captures real command via ps(1)
@@ -201,21 +317,21 @@ sudo -A <cmd>
      unseal with the one-time key → stdout → sudo
 ```
 
-- **Components** — `sudogate-server` (ssh client machine): listens on a unix socket
-  forwarded from each remote host, queues requests, seals and signs responses;
+- **Components** — `sudogate-server` (ssh client): listens on a unix socket
+  forwarded from each ssh server, queues requests, seals and signs responses;
   runs as a systemd --user service; embeds the private key. `sudogate-client`
-  (remote host): the askpass helper; embeds the public key and nothing else, runs
+  (ssh server): the askpass helper; embeds the public key and nothing else, runs
   on demand per sudo invocation, copy it to any number of hosts. `plugin/` (ssh
-  client machine): the omarchy quickshell review panel — watches the server's
+  client): the omarchy quickshell review panel — watches the server's
   state file with inotify (no polling), approves/denies via the server's control
   subcommands, password travels via stdin.
 - **Trust & crypto** — transport auth/encryption inherited from ssh; response
   origin proven by an Ed25519 signature over `id ‖ SHA256(cmd) ‖ SHA256(pubkey)`
   against the compiled-in public key; password sealed with XChaCha20-Poly1305
   under an X25519/HKDF key so that only the waiting askpass process can open it.
-- **Known limits** — same-uid code on the remote host can submit its own request
+- **Known limits** — same-uid code on the ssh server can submit its own request
   (phishing-class; the defense is reading the command, same as with local desktop
-  prompts). Same-uid DoS is unavoidable. A compromised ssh client machine is game
+  prompts). Same-uid DoS is unavoidable. A compromised ssh client is game
   over (it holds the private key).
 
 ## Behavior (measured)
@@ -235,14 +351,17 @@ commands are merged into one review.
 - **`sudo: no askpass program specified`** — `SUDO_ASKPASS` never reached the
   sudo process. Agent shells are non-interactive and read no rc files; see
   [Working with agents](#working-with-agents) for the environment chain.
-- **`remote port forwarding failed for listen path …`** — a stale
-  `/run/user/1000/sudogate.sock` (left behind by a dropped session) blocks the
-  forward, and `ExitOnForwardFailure` then drops the connection. Clear it with
-  a forwarding-free one-liner:
+- **`remote port forwarding failed for listen path …`** — the ssh server's
+  sshd defaults to `StreamLocalBindUnlink no`: the socket file survives session
+  teardown (**clean exits too**) and blocks the next connection's forward;
+  `ExitOnForwardFailure yes` then drops the connection. Clear it now:
 
   ```bash
-  ssh -o ClearAllForwardings=yes minipc 'rm -f /run/user/1000/sudogate.sock'
+  ssh -o ClearAllForwardings=yes <ssh-server> 'rm -f /run/user/1000/sudogate.sock'
   ```
+
+  For a permanent fix, see `StreamLocalBindUnlink yes` in
+  [Quick Start](#quick-start).
 
 - **`sudo -A` fails while you're away** — that is the design
   (disconnected = denied); the bridge only exists inside your live ssh session.
