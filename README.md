@@ -215,16 +215,22 @@ confirmation for `sudo` commands works as Gate 1.
 
 **Gate 2 — SudoGate asks before the password travels.** The full flow:
 
-```
-agent wants root
-  → Gate 1: agent tool asks "run sudo -A …?" — you approve the intent
-  → agent runs sudo -A <cmd>
-  → sudogate-client forwards the request over the ssh forward
-  → Gate 2: a window pops up (or the key badge on your bar turns red) —
-    read host / user / cwd / full command
-  → command matches what Gate 1 just showed? type the password (Enter).
-    Anything else — deny.
-  → sudo runs (or aborts); the agent sees only the exit code
+```mermaid
+sequenceDiagram
+    participant A as agent
+    participant G1 as Gate 1<br/>agent permission config
+    participant C as sudogate-client
+    participant S as sudogate-server<br/>+ review UI
+    participant H as operator (you)
+
+    A->>G1: wants to run sudo -A …
+    G1->>H: "run sudo -A …?" — approve the intent
+    A->>C: sudo -A <cmd>
+    C->>S: forwards the request over the ssh forward
+    S->>H: window pops (or badge turns red):<br/>host / user / cwd / full command
+    H->>S: matches Gate 1 → type password (Enter)<br/>anything else → deny
+    S-->>C: sealed password + signature
+    C-->>A: sudo runs (or aborts)<br/>agent sees only the exit code
 ```
 
 The review discipline that makes phishing hard: **approve only requests whose
@@ -407,21 +413,20 @@ sudogate-server review   # review the oldest: shows the command, hidden password
 
 ## Architecture
 
-```
-ssh server (agent)                     ssh client (operator)
-───────────────────                    ─────────────────────
-sudo -A <cmd>
- └─ sudogate-client (= SUDO_ASKPASS)
-     · captures real command via ps(1)
-     · one-time X25519 keypair
-          │ ── ssh -R unix socket ──▶ sudogate-server (systemd --user)
-          │   (dedicated channel managed by         │ review UIs: desktop popup
-          │    the server itself; independent       │ / TUI / omarchy panel / CLI
-          │    of tools & interactive sessions)     │ operator types password
-          │    request {cmd, id, pubkey}            │
-          ◀─ sealed password + signature ───────────┘
- └─ verify signature (compiled-in pubkey)
-     unseal with the one-time key → stdout → sudo
+```mermaid
+flowchart LR
+    subgraph SS["ssh server (agent)"]
+        SD["sudo -A &lt;cmd&gt;"]
+        CL["sudogate-client (= SUDO_ASKPASS)<br/>captures real command via ps(1)<br/>one-time X25519 keypair<br/>verify signature (compiled-in pubkey)<br/>unseal with the one-time key → stdout"]
+        SD --> CL
+    end
+    subgraph SC["ssh client (operator)"]
+        SV["sudogate-server (systemd --user)<br/>embedded forward manager + desktop popup<br/>queue · seal · sign"]
+        UI["review UIs<br/>desktop popup / TUI /<br/>omarchy panel / CLI<br/>operator types the password"]
+        UI -.-> SV
+    end
+    CL -- "ssh -R unix socket — dedicated channel<br/>managed by the server itself<br/>request {cmd, id, pubkey}" --> SV
+    SV -- "sealed password + signature" --> CL
 ```
 
 - **Components** — `sudogate-server` (ssh client): listens on a unix socket

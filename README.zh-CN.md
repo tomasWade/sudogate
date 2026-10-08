@@ -201,16 +201,22 @@ Claude Code 和 codex 有等价物；任何能对 `sudo` 命令要求人工确�
 
 **闸门 2 —— 密码动身前 SudoGate 问你。** 完整流程：
 
-```
-agent 要 root
-  → 闸门 1：agent 工具问“要跑 sudo -A … 吗？”——你批准意图
-  → agent 跑 sudo -A <cmd>
-  → sudogate-client 经 ssh 转发送出请求
-  → 闸门 2：弹出一个窗口（或 bar 上的钥匙徽标变红）——
-    读主机 / 用户 / 目录 / 完整命令
-  → 命令与闸门 1 刚批的对得上？输密码（回车）。
-    对不上——拒绝。
-  → sudo 执行（或中止）；agent 只看到退出码
+```mermaid
+sequenceDiagram
+    participant A as agent
+    participant G1 as 闸门 1<br/>agent 权限配置
+    participant C as sudogate-client
+    participant S as sudogate-server<br/>+ 审批界面
+    participant H as 操作者（你）
+
+    A->>G1: 要跑 sudo -A …？
+    G1->>H: 「run sudo -A …?」—— 批准意图
+    A->>C: sudo -A <cmd>
+    C->>S: 经 ssh 转发送出请求
+    S->>H: 弹窗（或徽标变红）：<br/>主机 / 用户 / 目录 / 完整命令
+    H->>S: 命令对得上 → 输密码（回车）<br/>对不上 → 拒绝
+    S-->>C: 密封密码 + 签名
+    C-->>A: sudo 执行（或中止）<br/>agent 只看到退出码
 ```
 
 让钓鱼变难的审阅纪律：**只批准命令与闸门 1 刚批内容一致的请求**。你没
@@ -376,21 +382,20 @@ sudogate-server review   # 审阅最旧一条：显示命令、隐藏式密码�
 
 ## 架构
 
-```
-ssh 服务器（agent）                     ssh 客户端（操作者）
-───────────────────                    ─────────────────────
-sudo -A <cmd>
- └─ sudogate-client（= SUDO_ASKPASS）
-     · 经 ps(1) 捕获真实命令
-     · 一次性 X25519 密钥对
-          │ ── ssh -R unix socket ──▶ sudogate-server（systemd --user）
-          │   （由 server 自管的专用通道；           │ 审批界面：桌面弹窗
-          │    与工具及交互会话无关）               │ / TUI / omarchy 面板 / CLI
-          │    请求 {cmd, id, pubkey}               │ 操作者输入密码
-          │                                         │
-          ◀─ 密封密码 + 签名 ───────────────────────┘
- └─ 验签（编译期内嵌公钥）
-     用一次性密钥解封 → stdout → sudo
+```mermaid
+flowchart LR
+    subgraph SS["ssh 服务器（agent）"]
+        SD["sudo -A &lt;cmd&gt;"]
+        CL["sudogate-client（= SUDO_ASKPASS）<br/>ps(1) 捕获真实命令<br/>一次性 X25519 密钥对<br/>验签（编译期内嵌公钥）<br/>一次性密钥解封 → stdout"]
+        SD --> CL
+    end
+    subgraph SC["ssh 客户端（操作者）"]
+        SV["sudogate-server（systemd --user）<br/>内嵌转发管理 + 桌面弹窗<br/>请求排队 · 密封 · 签名"]
+        UI["审批界面<br/>桌面弹窗 / TUI /<br/>omarchy 面板 / CLI<br/>操作者输入密码"]
+        UI -.-> SV
+    end
+    CL -- "ssh -R unix socket<br/>server 自管的专用通道<br/>请求 {cmd, id, pubkey}" --> SV
+    SV -- "密封密码 + 签名" --> CL
 ```
 
 - **组件** —— `sudogate-server`（ssh 客户端）：监听从各 ssh 服务器转发来
