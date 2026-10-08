@@ -1,0 +1,20 @@
+# sudogate 桌面弹窗审批配置（示例）
+# 复制到 ~/.config/sudogate/popup.conf 即启用（或 `sudogate-server popup on`
+# 生成默认模板）；删除文件或 `popup off` 关闭。每次触发时重读，编辑即时生效。
+#
+# 内容是"弹窗命令模板"：请求到达且队列非空且弹窗未开时，server 执行本行。
+# {tui} 占位符（必须独立成词）会被替换为 sudogate-tui --until-empty。
+# 按空白切分、不支持引号——各终端的命令行参数都不需要。
+# 队列清空时 TUI 自动退出，窗口随之消失。
+#
+# kitty（默认；按字符格定尺寸）：浮动/居中配合 Hyprland 规则见 README
+kitty --app-id sudogate-approve --override initial_window_width=90c --override initial_window_height=26c --override remember_window_size=no -e {tui}
+#
+# foot（尺寸交给 WM 规则）：
+# foot --app-id sudogate-approve -e {tui}
+#
+# alacritty（尺寸交给 WM 规则）：
+# alacritty --class sudogate-approve -e {tui}
+#
+# ghostty：
+# ghostty --class=sudogate-approve --window-width=90 --window-height=26 -e {tui}

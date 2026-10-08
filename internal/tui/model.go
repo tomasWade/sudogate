@@ -55,31 +55,33 @@ type Model struct {
 	statePath string
 	ctlPath   string
 
-	state    *State // nil = 文件读不到（server 未运行或从未有请求）
-	serverUp bool   // state 缺失时以 ctl socket 探测为准
-	cursor   int
-	mode     mode
-	pwInput  textinput.Model
-	pwTarget string    // 密码弹框针对的请求 id；state 滚动后据此取消或对准
-	note     string    // 底部状态提示（成功/失败），随 tick 清除
-	noteIsEr bool      // note 是否为错误
-	noteAt   time.Time // note 写入时刻，3s 后清除
-	msgCh    chan struct{}
-	width    int
-	height   int
+	state      *State // nil = 文件读不到（server 未运行或从未有请求）
+	serverUp   bool   // state 缺失时以 ctl socket 探测为准
+	untilEmpty bool   // 插件 tab 等临时模式：队列确认清空即自动退出
+	cursor     int
+	mode       mode
+	pwInput    textinput.Model
+	pwTarget   string    // 密码弹框针对的请求 id；state 滚动后据此取消或对准
+	note       string    // 底部状态提示（成功/失败），随 tick 清除
+	noteIsEr   bool      // note 是否为错误
+	noteAt     time.Time // note 写入时刻，3s 后清除
+	msgCh      chan struct{}
+	width      int
+	height     int
 }
 
-func New(statePath, ctlPath string) Model {
+func New(statePath, ctlPath string, untilEmpty bool) Model {
 	pw := textinput.New()
 	pw.Placeholder = "sudo 密码"
 	pw.EchoMode = textinput.EchoPassword
 	pw.EchoCharacter = '•'
 	pw.CharLimit = 128
 	return Model{
-		statePath: statePath,
-		ctlPath:   ctlPath,
-		msgCh:     make(chan struct{}, 8),
-		pwInput:   pw,
+		statePath:  statePath,
+		ctlPath:    ctlPath,
+		untilEmpty: untilEmpty,
+		msgCh:      make(chan struct{}, 8),
+		pwInput:    pw,
 	}
 }
 
@@ -91,7 +93,7 @@ func (m Model) Init() tea.Cmd {
 // Run 而非 Init：bubbletea 在 model 副本上调用 Init，经 model 状态保存的
 // stop 函数会随副本丢弃导致 inotify fd 泄漏。watcher 建立失败时降级为
 // 2s 轮询心跳，保证 TUI 仍能刷新（只是迟钝）。
-func Run(statePath, ctlPath string) error {
+func Run(statePath, ctlPath string, untilEmpty bool) error {
 	msgCh := make(chan struct{}, 8)
 	if stop, err := WatchState(statePath, msgCh); err == nil {
 		defer stop()
@@ -105,7 +107,7 @@ func Run(statePath, ctlPath string) error {
 			}
 		}()
 	}
-	m := New(statePath, ctlPath)
+	m := New(statePath, ctlPath, untilEmpty)
 	m.msgCh = msgCh
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
@@ -211,6 +213,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = max(0, len(m.state.Pending)-1)
 				}
 			}
+		}
+		// until-empty（插件 tab 等临时模式）：队列确认清空即退出，
+		// 宿主 tab 随进程消失自动关闭。半截坏读不触发（防误杀）；
+		// state 文件缺失（server 停机）同样视为空，一并退场。
+		if m.untilEmpty && !msg.readDirty && (msg.st == nil || len(msg.st.Pending) == 0) {
+			return m, tea.Quit
 		}
 		// re-arm 仅当消息来自 waitForState（它消费了一个 fsnotify 事件）；
 		// 动作后的主动读不占通道，补位反而会泄漏一个额外等待者。

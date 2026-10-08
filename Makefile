@@ -31,6 +31,9 @@ install-server: build
 	systemctl --user daemon-reload
 	systemctl --user enable --now sudogate.service
 
+install-tui: build
+	install -m 0755 build/sudogate-tui ~/.local/bin/
+
 # 转发通道由 server 内嵌管理（forward.conf + ctl 热生效）。
 # make install-forward HOST=<ssh-target>：server 在线则热添加（被拒绝则报错中止），
 # ctl 不可达（exit 3）才落盘配置待 server 启动生效。
@@ -55,4 +58,4 @@ install-forward: build
 install-client: build
 	install -m 0755 build/sudogate-client ~/.local/bin/
 
-.PHONY: keys inject build test install-plugin install-server install-client install-forward
+.PHONY: keys inject build test install-plugin install-server install-tui install-client install-forward

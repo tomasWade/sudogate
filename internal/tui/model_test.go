@@ -9,7 +9,7 @@ import (
 
 func testModel(t *testing.T) Model {
 	t.Helper()
-	m := New("/tmp/none.state", "/tmp/none.ctl")
+	m := New("/tmp/none.state", "/tmp/none.ctl", false)
 	m.state = &State{
 		Updated:    time.Now(),
 		TimeoutSec: 120,
@@ -177,6 +177,44 @@ func TestViewForwardHealth(t *testing.T) {
 	v = m.View()
 	if !contains(v, "nuc") || !contains(v, "ssh: connect timeout") {
 		t.Fatalf("故障主机应展开 LastErr: %s", v)
+	}
+}
+
+func TestUntilEmptyQuitsOnEmpty(t *testing.T) {
+	// until-empty：state 文件缺失（st==nil）→ 退出
+	m := New("/tmp/none.state", "/tmp/none.ctl", true)
+	_, cmd := m.Update(stateChangedMsg{})
+	if cmd == nil {
+		t.Fatal("until-empty + 空 state 应返回 Quit")
+	}
+	// 队列清空 → 退出
+	m2 := testModel(t)
+	m2.untilEmpty = true
+	m2.state.Pending = nil
+	_, cmd2 := m2.Update(stateChangedMsg{st: m2.state})
+	if cmd2 == nil {
+		t.Fatal("until-empty + pending 清空应返回 Quit")
+	}
+	// 半截坏读不触发（防误杀）
+	m3 := testModel(t)
+	m3.untilEmpty = true
+	_, cmd3 := m3.Update(stateChangedMsg{readDirty: true})
+	if cmd3 != nil {
+		t.Fatal("readDirty 不应触发 Quit")
+	}
+	// 队列非空不退出
+	m4 := testModel(t)
+	m4.untilEmpty = true
+	_, cmd4 := m4.Update(stateChangedMsg{st: m4.state})
+	if cmd4 != nil {
+		t.Fatal("pending 非空不应 Quit")
+	}
+	// 常规模式（untilEmpty=false）永不自动退出
+	m5 := testModel(t)
+	m5.state.Pending = nil
+	_, cmd5 := m5.Update(stateChangedMsg{st: m5.state})
+	if cmd5 != nil {
+		t.Fatal("非 until-empty 模式不应 Quit")
 	}
 }
 

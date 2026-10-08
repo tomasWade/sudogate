@@ -27,6 +27,8 @@ type Options struct {
 	AuditPath  string
 	// ForwardConfPath 非空时启用内嵌转发管理（专用 ssh -N -R 通道）。
 	ForwardConfPath string
+	// PopupConfPath 非空时启用桌面弹窗审批（配置即终端，见 PopupManager）。
+	PopupConfPath string
 }
 
 type Entry struct {
@@ -70,9 +72,10 @@ type auditEntry struct {
 }
 
 type Server struct {
-	opt  Options
-	priv ed25519.PrivateKey
-	fwd  *ForwardManager
+	opt   Options
+	priv  ed25519.PrivateKey
+	fwd   *ForwardManager
+	popup *PopupManager
 
 	mu           sync.Mutex
 	entries      map[string]*Entry
@@ -97,6 +100,9 @@ func New(priv ed25519.PrivateKey, opt Options) *Server {
 		// notifyState 会经 fwd.List() 回取 fwd.mu，因此回调只会在
 		// manager 无锁时被调（Add/Remove/supervise 均已保证锁外 notify）。
 		s.fwd.SetOnChange(s.notifyState)
+	}
+	if opt.PopupConfPath != "" {
+		s.popup = NewPopupManager(opt.PopupConfPath, "")
 	}
 	return s
 }
@@ -214,6 +220,15 @@ func (s *Server) handleData(conn net.Conn) {
 		proto.WriteFrame(conn, &proto.Response{V: proto.Version, OK: false, ID: req.ID, Reason: proto.ReasonBusy})
 		conn.Close()
 		return
+	}
+	// 桌面弹窗：必须在 s.mu 之外调 Notify（PopupManager 有自己的锁）。
+	// 读长度与 Notify 之间若有并发入队，多算的条目无害——去重靠弹窗
+	// 进程探测，不靠精确计数。
+	if s.popup != nil {
+		s.mu.Lock()
+		n := len(s.entries)
+		s.mu.Unlock()
+		s.popup.Notify(n)
 	}
 	// 取消感知：askpass 协议里 client 发完请求帧后不会再发任何数据，
 	// 所以本连接上任何 Read 返回（EOF/RST/数据/超时）都意味着 client

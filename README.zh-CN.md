@@ -298,6 +298,56 @@ herdr、VS Code Remote 这类工具连远程时往往自己起 ssh、用自己�
 状态（`forward list` 看着还是 ✓）。迁移到内嵌转发后，请把
 `~/.ssh/config` 里所有 sudogate 相关的 `RemoteForward` 行删掉。
 
+## 桌面弹窗审批（可选）
+
+server 内置桌面弹窗：请求到达且队列非空且弹窗未开时，自动弹出一个
+居中浮动的终端窗口跑 `sudogate-tui`，队列清空（批完/拒完/超时/申请人
+撤回）后 TUI 自动退出、窗口随之消失。弹窗不会被 server 的停止/重启
+信号强杀（独立会话 + service 单元 KillMode=process），窗口总是经 TUI
+自身优雅关闭；q 关窗 = 弃管本批（交给超时兜底），之后**新请求到达**
+会重新弹（其他端处理条目不会触发重弹）。
+
+### 开启与关闭
+
+```bash
+sudogate-server popup on      # 生成默认 kitty 模板并启用
+sudogate-server popup status  # 查看状态/模板/弹窗
+sudogate-server popup off     # 关闭
+```
+
+### 配置即终端
+
+开关只是一个文件：`~/.config/sudogate/popup.conf`（存在即启用，每次
+触发时重读，**编辑即时生效**）。内容是弹窗命令模板，`{tui}` 占位符
+（必须独立成词）被替换为 `sudogate-tui --until-empty`：
+
+```bash
+kitty --app-id sudogate-approve --override initial_window_width=90c --override initial_window_height=26c --override remember_window_size=no -e {tui}
+```
+
+换终端改一行即可（更多模板见 `packaging/popup.conf.example`）：
+foot 用 `foot --app-id sudogate-approve -e {tui}`、alacritty 用
+`alacritty --class sudogate-approve -e {tui}`……server 对终端零知识。
+
+### 窗口浮动规则（Hyprland）
+
+新窗口默认平铺；要"弹框"观感需按窗口标识配一条浮动居中规则。
+omarchy 的 lua 配置（`~/.config/hypr/`）写法：
+
+```lua
+o.window({ class = "^sudogate-approve$" }, { float = true, size = "800 480", center = true })
+```
+
+其他 WM/DE 用各自的窗口规则语法按同样的 class/app-id 匹配即可；
+不配规则也能用，只是窗口平铺进布局而非弹框。
+
+### 注意
+
+- server 以 systemd user service 运行时会继承 `WAYLAND_DISPLAY` 等
+  会话环境；在无图形环境的机器上开启无效（spawn 失败仅记日志）
+- 模板按空白切分、不支持引号——各终端命令行参数都不需要
+- 多显示器下窗口出现在焦点所在的显示器（新窗口跟随当前工作区）
+
 ## 架构
 
 ```

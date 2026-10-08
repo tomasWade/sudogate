@@ -56,6 +56,15 @@ func main() {
 			os.Exit(2)
 		}
 		os.Exit(server.RunForward(ctlPath(*socket), args))
+	case "popup":
+		fs := flag.NewFlagSet("popup", flag.ExitOnError)
+		socket := fs.String("socket", "", "数据 socket 路径（须置于子命令前）")
+		fs.Parse(os.Args[2:])
+		args := fs.Args()
+		if len(args) == 0 {
+			args = []string{"status"}
+		}
+		os.Exit(server.RunPopup(ctlPath(*socket), args))
 	case "deny":
 		fs := flag.NewFlagSet("deny", flag.ExitOnError)
 		socket := fs.String("socket", "", "数据 socket 路径")
@@ -97,6 +106,8 @@ func cmdServe(args []string) {
 		AuditPath:  auditPath,
 		// 内嵌转发管理：配置文件存在与否都交给 manager 处理（缺失=空列表）。
 		ForwardConfPath: server.DefaultForwardConf(),
+		// 桌面弹窗审批：popup.conf 存在即启用（配置即终端）。
+		PopupConfPath: server.DefaultPopupConf(),
 	}).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "sudogate-server:", err)
 		os.Exit(1)
@@ -139,5 +150,6 @@ func usage() {
   status   [-socket 路径] [--waybar]                        查看待批
   approve  -id ID [-socket 路径]                            从 stdin 读密码批准（测试用）
   deny     -id ID [-socket 路径]                            拒绝
-  forward  [-socket 路径] list|add <host>|remove <host>     管理专用转发通道`)
+  forward  [-socket 路径] list|add <host>|remove <host>     管理专用转发通道
+  popup    [-socket 路径] on|off|status                     桌面弹窗审批开关`)
 }

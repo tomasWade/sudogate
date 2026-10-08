@@ -5,6 +5,12 @@ Documentation=https://github.com/tomasWade/sudogate
 [Service]
 ExecStart=%h/.local/bin/sudogate-server serve
 Restart=on-failure
+# process：stop/restart 只信号主进程，cgroup 内其余进程一律不碰——
+# 桌面审批弹窗（server spawn 的 kitty，Setsid 独立会话但仍在 cgroup
+# 内）按设计要独立存活，server 重启不得闪窗。默认 control-group 与
+# mixed 都会在主进程退出后清理剩余进程、杀掉弹窗。转发通道不受影响：
+# 正常退出走 Shutdown，崩溃由 Pdeathsig 兜底。
+KillMode=process
 
 [Install]
 WantedBy=default.target

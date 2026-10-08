@@ -324,6 +324,63 @@ nameless — still looks ✓ in `forward list`. After migrating to the embedded
 forward, delete every sudogate-related `RemoteForward` line from
 `~/.ssh/config`.
 
+## Desktop popup approval (optional)
+
+The server has a built-in desktop popup: when a request arrives with the
+queue non-empty and no popup window open, it spawns a floating terminal
+window running `sudogate-tui`. When the queue drains (approved / denied /
+timed out / withdrawn by the requester), the TUI exits and the window
+disappears with it. The popup is never signal-killed by server
+stop/restart (separate session + `KillMode=process` in the service unit);
+the window always closes gracefully through the TUI itself. Closing it
+with `q` abandons the current batch to the timeout, and only a **new
+request** pops it again (activity from other UIs never re-pops).
+
+### Enable / disable
+
+```bash
+sudogate-server popup on      # write the default kitty template and enable
+sudogate-server popup status  # show state / template / window
+sudogate-server popup off     # disable
+```
+
+### Config-as-terminal
+
+The switch is just a file: `~/.config/sudogate/popup.conf` (present =
+enabled; re-read on every trigger, so **edits take effect immediately**).
+Its content is the popup command template — the `{tui}` placeholder (must
+be a standalone word) expands to `sudogate-tui --until-empty`:
+
+```bash
+kitty --app-id sudogate-approve --override initial_window_width=90c --override initial_window_height=26c --override remember_window_size=no -e {tui}
+```
+
+Switching terminals is a one-line edit (more templates in
+`packaging/popup.conf.example`): `foot --app-id sudogate-approve -e {tui}`,
+`alacritty --class sudogate-approve -e {tui}`, … The server knows nothing
+about terminals.
+
+### Floating window rule (Hyprland)
+
+New windows tile by default; for popup behavior add a float+center rule on
+the window class. With omarchy's lua config (`~/.config/hypr/`):
+
+```lua
+o.window({ class = "^sudogate-approve$" }, { float = true, size = "800 480", center = true })
+```
+
+Other WMs/DEs: use their window-rule syntax with the same class/app-id.
+Without a rule it still works — the window just tiles into the layout.
+
+### Notes
+
+- Running under a systemd user service the server inherits `WAYLAND_DISPLAY`
+  from the session; on headless machines enabling this does nothing (spawn
+  failures are logged only)
+- The template is whitespace-split, no quoting — terminal command lines
+  don't need it
+- Multi-monitor: the window opens on the monitor of the current workspace
+
 ## Architecture
 
 ```
