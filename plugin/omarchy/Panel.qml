@@ -37,6 +37,11 @@ Panel {
     ? runtimeDirSetting
     : (Quickshell.env("XDG_RUNTIME_DIR") || "/run/user/1000")
   readonly property string statePath: runtimeDir + "/sudogate.state"
+  // 所在目录（inotifywait 监听目录、按文件名过滤，见 watchProc 注释）
+  readonly property string stateDir: {
+    const i = statePath.lastIndexOf("/")
+    return i > 0 ? statePath.substring(0, i) : "."
+  }
 
   // ---- theme ------------------------------------------------------------------
   readonly property color fg: Color.popups.text
@@ -412,20 +417,25 @@ Panel {
     }
   }
 
-  // inotifywait on the state file: one event letter per change (MailWidget
-  // pattern). The server rewrites the file on every queue transition, so this
-  // is the whole update story — no polling timer anywhere. Bursts (several
-  // requests landing at once) coalesce through the 100ms debounce.
+  // inotifywait on the state file's DIRECTORY, filename filtered in QML:
+  // watching the file inode breaks under tmp+rename atomic writes (move_self
+  // fires once, then the watch goes permanently deaf — the process never
+  // exits, so the retry timer never runs). Directory watch + moved_to/create
+  // survives any write strategy. No shell wrapper / pipeline either:
+  // Quickshell's Process kills only its direct child, so `sh -c 'a | b'`
+  // would orphan the inotifywait/grep grandchildren on reload — argv mode
+  // (mail widget pattern) keeps the worker as the direct child. Bursts
+  // coalesce through the 100ms debounce; no polling timer anywhere.
   Process {
     id: watchProc
 
-    command: ["/usr/bin/inotifywait", "-m", "-q", "-e", "modify,create,move_self", "--format", "c", root.statePath]
+    command: ["/usr/bin/inotifywait", "-m", "-q", "-e", "modify,create,moved_to", "--format", "%f", root.stateDir]
     running: !root.demo
 
     stdout: SplitParser {
       splitMarker: "\n"
 
-      onRead: catDebounce.restart()
+      onRead: if (read.trim() === "sudogate.state") catDebounce.restart()
     }
 
     onExited: watchRetryTimer.restart()

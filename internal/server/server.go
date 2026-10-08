@@ -347,16 +347,12 @@ func (s *Server) writeStateLocked() {
 		forwards = s.fwd.List()
 	}
 	b, _ := json.Marshal(state{Updated: time.Now(), TimeoutSec: int64(s.opt.Timeout / time.Second), Forwards: forwards, Pending: pending})
-	// tmp+rename 原子写：转发状态翻转会放大本文件的写入频率，原地
-	// truncate+write 会让无半读防御的消费者（omarchy 面板对每个 inotify
-	// 事件直接 cat）读到截断 JSON；rename 落盘对 fsnotify 侧（watch 目录）
-	// 依然可见。
+	// 原地写（truncate+write），不能用 tmp+rename 原子写：omarchy 面板的
+	// inotifywait watch 的是本文件的 inode，rename 换 inode 会让它在
+	// move_self 事件后永久失聪（进程不退出、也不触发重试）。半读窗口由
+	// 各消费者防御：TUI 有 readDirty 保底，面板 cat 小文件窗口极小。
 	os.MkdirAll(filepath.Dir(s.opt.StatePath), 0o700)
-	tmp := s.opt.StatePath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return
-	}
-	os.Rename(tmp, s.opt.StatePath)
+	os.WriteFile(s.opt.StatePath, b, 0o600)
 }
 
 func (s *Server) appendAudit(e *Entry, decision string) {
