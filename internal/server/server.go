@@ -25,6 +25,8 @@ type Options struct {
 	MaxPending int
 	StatePath  string
 	AuditPath  string
+	// ForwardConfPath 非空时启用内嵌转发管理（专用 ssh -N -R 通道）。
+	ForwardConfPath string
 }
 
 type pendingConn struct {
@@ -75,6 +77,7 @@ type auditEntry struct {
 type Server struct {
 	opt  Options
 	priv ed25519.PrivateKey
+	fwd  *ForwardManager
 
 	mu       sync.Mutex
 	entries  map[string]*Entry
@@ -88,12 +91,27 @@ func New(priv ed25519.PrivateKey, opt Options) *Server {
 	if opt.MaxPending <= 0 {
 		opt.MaxPending = 5
 	}
-	return &Server{
+	s := &Server{
 		opt:      opt,
 		priv:     priv,
 		entries:  map[string]*Entry{},
 		mergeIdx: map[string]string{},
 	}
+	if opt.ForwardConfPath != "" {
+		s.fwd = NewForwardManager(opt.ForwardConfPath, opt.SocketPath)
+		// 转发状态翻转 → 重写 state：TUI/面板经 fsnotify 拿到健康灯。
+		// notifyState 会经 fwd.List() 回取 fwd.mu，因此回调只会在
+		// manager 无锁时被调（Add/Remove/supervise 均已保证锁外 notify）。
+		s.fwd.SetOnChange(s.notifyState)
+	}
+	return s
+}
+
+// notifyState 重写一次 state 文件（转发状态变化等来源调用）。
+func (s *Server) notifyState() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.writeStateLocked()
 }
 
 func (s *Server) Run() error {
@@ -110,6 +128,18 @@ func (s *Server) Run() error {
 	}
 	os.Chmod(s.opt.SocketPath, 0o600)
 	os.Chmod(CtlPath(s.opt.SocketPath), 0o600)
+
+	// 启动即落一次空 state：让 TUI/面板在空闲期也能确认 server 存活，
+	// 否则文件只在首条请求后才出现，"读不到"会被误读为"未运行"。
+	s.mu.Lock()
+	s.writeStateLocked()
+	s.mu.Unlock()
+
+	// 内嵌转发管理：拉起各主机的专用 ssh -N -R 通道（子进程由 Pdeathsig
+	// 与 Shutdown 双重看护，随 server 生命周期同生共死）。
+	if s.fwd != nil {
+		s.fwd.Start()
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -143,6 +173,9 @@ func (s *Server) Run() error {
 	}
 	dataWG.Wait()
 	ctlWG.Wait()
+	if s.fwd != nil {
+		s.fwd.Shutdown()
+	}
 	s.closeAll()
 	return nil
 }
@@ -300,16 +333,30 @@ func (s *Server) writeStateLocked() {
 		return
 	}
 	type state struct {
-		Updated time.Time   `json:"updated"`
-		Pending []EntryInfo `json:"pending"`
+		Updated    time.Time      `json:"updated"`
+		TimeoutSec int64          `json:"timeout_sec"`
+		Forwards   []ForwardState `json:"forwards,omitempty"`
+		Pending    []EntryInfo    `json:"pending"`
 	}
 	pending := make([]EntryInfo, 0, len(s.entries))
 	for _, e := range s.entries {
 		pending = append(pending, e.info())
 	}
-	b, _ := json.Marshal(state{Updated: time.Now(), Pending: pending})
+	var forwards []ForwardState
+	if s.fwd != nil {
+		forwards = s.fwd.List()
+	}
+	b, _ := json.Marshal(state{Updated: time.Now(), TimeoutSec: int64(s.opt.Timeout / time.Second), Forwards: forwards, Pending: pending})
+	// tmp+rename 原子写：转发状态翻转会放大本文件的写入频率，原地
+	// truncate+write 会让无半读防御的消费者（omarchy 面板对每个 inotify
+	// 事件直接 cat）读到截断 JSON；rename 落盘对 fsnotify 侧（watch 目录）
+	// 依然可见。
 	os.MkdirAll(filepath.Dir(s.opt.StatePath), 0o700)
-	os.WriteFile(s.opt.StatePath, b, 0o600)
+	tmp := s.opt.StatePath + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return
+	}
+	os.Rename(tmp, s.opt.StatePath)
 }
 
 func (s *Server) appendAudit(e *Entry, decision string) {

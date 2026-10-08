@@ -8,7 +8,7 @@ import qs.Ui
 
 // SudoGate review panel and data owner. The bar badge and this panel read the
 // same state: sudogate-server writes $XDG_RUNTIME_DIR/sudogate.state as one
-// JSON object ({updated, pending[]}) on every queue change; we watch it with
+// JSON object ({updated, timeout_sec, pending[]}) on every queue change; we watch it with
 // inotifywait (event-driven, zero polling — the mail widget pattern) and re-cat
 // on every event. Approve/deny shell out to the sudogate-server binary's
 // control subcommands; the password travels via stdin, never argv.

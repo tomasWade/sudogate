@@ -106,6 +106,7 @@ func run(pub ed25519.PublicKey, selfTest bool) int {
 	conn, err := net.DialTimeout("unix", socket, 3*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sudogate: 无法连接 %s（ssh -R 未连接或 server 未运行？）: %v\n", socket, err)
+		fmt.Fprintln(os.Stderr, "sudogate: 排查：本机侧 `sudogate-server forward list` 查看该主机的转发通道是否 ✓")
 		return 1
 	}
 	defer conn.Close()

@@ -12,12 +12,14 @@ type CtlRequest struct {
 	Op       string `json:"op"`
 	ID       string `json:"id,omitempty"`
 	Password string `json:"password,omitempty"`
+	Host     string `json:"host,omitempty"`
 }
 
 type CtlReply struct {
-	OK      bool        `json:"ok"`
-	Error   string      `json:"error,omitempty"`
-	Pending []EntryInfo `json:"pending,omitempty"`
+	OK       bool           `json:"ok"`
+	Error    string         `json:"error,omitempty"`
+	Pending  []EntryInfo    `json:"pending,omitempty"`
+	Forwards []ForwardState `json:"forwards,omitempty"`
 }
 
 func CtlPath(dataPath string) string {
@@ -42,6 +44,29 @@ func (s *Server) handleCtl(conn net.Conn) {
 		}
 	case "deny":
 		if err := s.Deny(req.ID); err != nil {
+			reply.OK = false
+			reply.Error = err.Error()
+		}
+	case "forward-list":
+		if s.fwd == nil {
+			reply.OK = false
+			reply.Error = "forward manager disabled"
+		} else {
+			reply.Forwards = s.fwd.List()
+		}
+	case "forward-add":
+		if s.fwd == nil {
+			reply.OK = false
+			reply.Error = "forward manager disabled"
+		} else if err := s.fwd.Add(req.Host); err != nil {
+			reply.OK = false
+			reply.Error = err.Error()
+		}
+	case "forward-remove":
+		if s.fwd == nil {
+			reply.OK = false
+			reply.Error = "forward manager disabled"
+		} else if err := s.fwd.Remove(req.Host); err != nil {
 			reply.OK = false
 			reply.Error = err.Error()
 		}

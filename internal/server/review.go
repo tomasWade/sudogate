@@ -68,6 +68,59 @@ func RunReview(ctlPath, idArg string) int {
 	return 0
 }
 
+// RunForward 管理 CLI 的 forward 子命令：list / add / remove。
+func RunForward(ctlPath string, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "用法: sudogate-server forward [-socket 路径] list|add <host>|remove <host>")
+		return 2
+	}
+	var req *CtlRequest
+	switch args[0] {
+	case "list":
+		req = &CtlRequest{Op: "forward-list"}
+	case "add":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "add 需要 <host>")
+			return 2
+		}
+		req = &CtlRequest{Op: "forward-add", Host: args[1]}
+	case "remove":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "remove 需要 <host>")
+			return 2
+		}
+		req = &CtlRequest{Op: "forward-remove", Host: args[1]}
+	default:
+		fmt.Fprintln(os.Stderr, "未知子命令:", args[0])
+		return 2
+	}
+	r, err := CtlCall(ctlPath, req)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sudogate: server 未运行（转发变更需 server 在线）:", err)
+		return 3 // 3 = ctl 不可达，Makefile 据此区分"落盘待启动"与"被拒绝"
+	}
+	if !r.OK {
+		fmt.Fprintln(os.Stderr, "sudogate: forward 失败:", r.Error)
+		return 1
+	}
+	if args[0] == "list" {
+		if len(r.Forwards) == 0 {
+			fmt.Println("无转发通道（add <host> 添加）")
+			return 0
+		}
+		for _, f := range r.Forwards {
+			mark := "✗"
+			if f.Running {
+				mark = "✓"
+			}
+			fmt.Printf("%s %-24s 重启%-3d %s\n", mark, f.Host, f.Restarts, f.LastErr)
+		}
+	} else {
+		fmt.Println("完成")
+	}
+	return 0
+}
+
 func errOr(r *CtlReply, err error) string {
 	if err != nil {
 		return err.Error()

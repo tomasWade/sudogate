@@ -46,6 +46,16 @@ func main() {
 			os.Exit(2)
 		}
 		os.Exit(server.RunApprove(ctlPath(*socket), *id))
+	case "forward":
+		fs := flag.NewFlagSet("forward", flag.ExitOnError)
+		socket := fs.String("socket", "", "数据 socket 路径（须置于子命令前）")
+		fs.Parse(os.Args[2:])
+		args := fs.Args()
+		if len(args) == 0 {
+			fmt.Fprintln(os.Stderr, "用法: sudogate-server forward [-socket 路径] list|add <host>|remove <host>")
+			os.Exit(2)
+		}
+		os.Exit(server.RunForward(ctlPath(*socket), args))
 	case "deny":
 		fs := flag.NewFlagSet("deny", flag.ExitOnError)
 		socket := fs.String("socket", "", "数据 socket 路径")
@@ -85,6 +95,8 @@ func cmdServe(args []string) {
 		MaxPending: *maxPending,
 		StatePath:  statePath,
 		AuditPath:  auditPath,
+		// 内嵌转发管理：配置文件存在与否都交给 manager 处理（缺失=空列表）。
+		ForwardConfPath: server.DefaultForwardConf(),
 	}).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "sudogate-server:", err)
 		os.Exit(1)
@@ -122,9 +134,10 @@ func userName() string {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `用法: sudogate-server <子命令>
-  serve   [-socket 路径] [-timeout 秒] [-max-pending N]   常驻服务
-  review  [-socket 路径] [-id ID]                          审阅最旧/指定请求并输密码
-  status  [-socket 路径] [--waybar]                        查看待批
-  approve -id ID [-socket 路径]                            从 stdin 读密码批准（测试用）
-  deny    -id ID [-socket 路径]                            拒绝`)
+  serve    [-socket 路径] [-timeout 秒] [-max-pending N]   常驻服务（含转发管理）
+  review   [-socket 路径] [-id ID]                          审阅最旧/指定请求并输密码
+  status   [-socket 路径] [--waybar]                        查看待批
+  approve  -id ID [-socket 路径]                            从 stdin 读密码批准（测试用）
+  deny     -id ID [-socket 路径]                            拒绝
+  forward  [-socket 路径] list|add <host>|remove <host>     管理专用转发通道`)
 }
