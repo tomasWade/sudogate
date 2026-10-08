@@ -14,41 +14,55 @@ will eventually need `sudo`. The usual options are all bad:
 - **Forwarding a GUI dialog** — needs a forwarded display, useless on headless boxes
 
 SudoGate takes another route: the agent runs plain `sudo -A`, and the password
-prompt travels back **through the ssh session you already have open** to your ssh
-client. Every elevation is read and approved by a human; the password is
-typed fresh each time and never stored on either machine.
+prompt travels back **through a dedicated ssh forward** to your machine. Every
+elevation is read and approved by a human; the password is typed fresh each
+time and never stored on either machine.
+
+What that looks like on the operator's desktop — the agent ran `sudo -A id`
+on the ssh server, and this window popped by itself:
+
+![Desktop overview: a floating approval window popped in the middle of the screen](docs/screenshots/popup-overview.webp)
 
 ## Features
 
+Ways you use it:
+
+- **Desktop popup** — a request pops a floating window in your face; when the
+  queue drains (approved / denied / timed out / withdrawn) the window closes
+  itself. Enable with one command: `sudogate-server popup on`
+- **Review from any surface** — desktop popup, terminal TUI, omarchy panel,
+  or plain CLI; all backed by one server, decisions are first-come-first-served
+- **Live queue** — per-request countdowns, per-host forward health lights,
+  instant updates (fsnotify, zero polling); Ctrl+C on the agent side
+  withdraws its review immediately
+- **Audit trail** — every decision (approved / denied / timeout / cancelled /
+  shutdown) logged as JSONL
+
+Security model:
+
 - Human in the loop, per command — one review per elevation; deny stops it instantly
-- Zero password persistence — nothing at rest on either end
+- Zero password persistence — typed fresh each time, nothing at rest on either end
 - No new trust surface — transport is an ssh `-R` unix-socket forward; authentication
   and encryption come from ssh itself. No ports, no certificates
 - Compile-time key split — server binary embeds the private key, client binary embeds
   the public key; the codebase has no key-generation path
 - Tamper-proof by construction — per-request X25519 sealing, Ed25519 signatures,
   one-time ids and command-hash binding
-- Disconnected = denied — with the ssh-client machine (where the server runs) off or unreachable, the forward dies with it and remote `sudo -A` simply fails
-- Audit trail — every decision logged as JSONL
+- Disconnected = denied — with the ssh-client machine (where the server runs) off
+  or unreachable, the forward dies with it and remote `sudo -A` simply fails
 - Pairs with your agent's own gate — e.g. opencode's `"*sudo*": "ask"` rule,
   giving two independent approvals per command
 
 ## Quick Start
 
-Three roles first: the **build machine** (has the repo and keys, runs `make`),
-the **ssh client** (your machine, runs sudogate-server and the review UI), and
-the **ssh server** (the machine agents run on, gets sudogate-client). Usually
-the build machine and the ssh client are the same box; only the "build on the
-server" route below turns the ssh server into a build machine.
+Three roles: the **build machine** (repo + keys, runs `make`), the **ssh client**
+(your machine, runs sudogate-server and the review UI), the **ssh server**
+(the machine agents run on, gets sudogate-client). Usually the first two are
+the same box. Building needs Go ≥ 1.24, make, openssl. `<ssh-server>` below
+means `user@host` or its ssh-config alias.
 
-Requirements: building needs Go ≥ 1.24, make, openssl; the ssh server needs
-nothing beyond traditional sudo if you copy the binary over (sudo-rs has no
-askpass support). In the commands below, `<ssh-server>` means your ssh server
-(`user@host` or its alias in ssh config); the `/run/user/1000/` in socket paths
-is the uid-1000 spelling — change it on whichever end isn't uid 1000.
-
-Generate a keypair once, with any third-party tool, and keep it out of band — the
-repo never stores keys, and every machine that builds needs the same pair:
+**1. Keypair, once** (any third-party tool; out of band — the repo never
+stores keys, every build machine needs the same pair):
 
 ```bash
 mkdir -p keys
@@ -56,32 +70,74 @@ openssl genpkey -algorithm ed25519 -out keys/laptop.key
 openssl pkey -in keys/laptop.key -pubout -out keys/laptop.pub
 ```
 
-On the **ssh client** (the machine in front of you):
+**2. ssh client** — server + service (+ optional review surfaces):
 
 ```bash
 make install-server    # build + ~/.local/bin + systemd --user service
 make install-plugin    # omarchy review panel (optional, recommended)
+sudogate-server popup on   # desktop popup (optional; see Review UIs)
 ```
 
-Then establish the dedicated forward channel to each ssh server (once per
-machine; the target must accept passwordless BatchMode ssh):
+**3. Forward channel**, once per ssh server (target must accept passwordless
+BatchMode ssh):
 
 ```bash
-make install-forward HOST=<ssh-server>   # same as sudogate-server forward add
+make install-forward HOST=<ssh-server>
+# remote uid ≠ 1000? override the socket path:
+# make install-forward HOST=nuc:/run/user/1001/sudogate.sock
 ```
 
-The remote socket defaults to `/run/user/1000/sudogate.sock` (uid-1000
-spelling); override it per host when the target's uid differs:
+**4. ssh server** — copy the client over (static Go binary, zero deps;
+traditional sudo required — sudo-rs has no askpass):
 
 ```bash
-make install-forward HOST=nuc:/run/user/1001/sudogate.sock
+ssh <ssh-server> 'mkdir -p ~/.local/bin'
+scp build/sudogate-client <ssh-server>:.local/bin/
+echo 'export SUDO_ASKPASS=$HOME/.local/bin/sudogate-client' | ssh <ssh-server> 'cat >> ~/.profile'
 ```
+
+<details>
+<summary><b>Alternative routes</b> — build on the ssh server · agent (non-interactive) environment</summary>
+
+```bash
+# Build-on-the-server route: clone the repo on the ssh server, place the same
+# keypair in keys/, then make (inject needs the private key present — don't
+# take the private key to more machines than necessary)
+make install-client
+```
+
+The `~/.profile` export covers interactive shells. Agent shells are
+non-interactive and read **no rc files** — for the variable to reach the
+agent process environment, see [Working with agents](#working-with-agents).
+
+</details>
+
+**5. One-time sshd config on the ssh server (root)**: sshd leaves the socket
+file behind when a connection ends (even a clean exit) and the stale file
+blocks forward re-establishment. Make each new connection unlink it before
+binding — the server's embedded forward relies on this for reliable self-heal:
+
+```bash
+echo 'StreamLocalBindUnlink yes' | sudo tee /etc/ssh/sshd_config.d/99-sudogate.conf
+sudo systemctl restart ssh    # Debian/Ubuntu; other distros may call it sshd
+```
+
+**6. Verify end to end** on the ssh server:
+
+```bash
+sudogate-client test   # a review request pops up on the ssh client
+sudo -A <command>      # the real thing
+```
+
+![CLI verification: status and forward list](docs/screenshots/cli.webp)
+
+<details>
+<summary><b>How the forward channel works</b> — and why <code>~/.ssh/config</code> must stay clean</summary>
 
 Forwards are managed **inside the server** (`~/.config/sudogate/forward.conf`,
 one host per line): each target runs as a supervised `ssh -N -R` child
 process — alive whether or not you have an interactive session, restarted
-with backoff on failure, reaped when the server exits, and the remote sshd
-self-heals stale sockets on reconnect. Inspect at any time:
+with backoff on failure, reaped when the server exits. Inspect at any time:
 
 ```bash
 sudogate-server forward list     # per-host ✓/✗, restart count, last error
@@ -92,99 +148,12 @@ short-lived ssh that matches such a block (health probes from workspace
 tools, one-off `ssh host 'cmd'` runs, reconnecting mounts) will steal the
 socket path, die seconds later, and leave a corpse file that remote `sudo -A`
 reads as `connection refused` — even while a perfectly healthy forward
-listener exists namelessly beside it.
+listener exists namelessly beside it. With `StreamLocalBindUnlink yes` this
+happens unconditionally on every matching connection — see
+[When a tool such as herdr runs the ssh for you](#when-a-tool-such-as-herdr-runs-the-ssh-for-you)
+for the full anatomy.
 
-On each **ssh server** (the machines agents run on) — two ways to install the client:
-
-```bash
-# Copy route (recommended): the client was already built by make install-server;
-# run this on the ssh client (static Go binary, zero deps on the server):
-ssh <ssh-server> 'mkdir -p ~/.local/bin'
-scp build/sudogate-client <ssh-server>:.local/bin/
-```
-
-```bash
-# Build-on-the-server route: clone the repo on the ssh server, place the same
-# keypair in keys/, then make (note that inject needs the private key present —
-# don't take the private key to more machines than necessary)
-make install-client
-```
-
-Either way, finish on the ssh server:
-
-```bash
-# interactive shells:
-echo 'export SUDO_ASKPASS=$HOME/.local/bin/sudogate-client' >> ~/.profile
-# agent (non-interactive) inheritance needs more — see "Working with agents"
-```
-
-**One-time sshd config on the ssh server (root)**: sshd does not remove the
-socket file when a connection ends (even a clean exit), and the stale file
-blocks forward re-establishment. Make each new connection unlink it before
-binding (the server's embedded forward relies on this for reliable self-heal):
-
-```bash
-echo 'StreamLocalBindUnlink yes' | sudo tee /etc/ssh/sshd_config.d/99-sudogate.conf
-sudo systemctl restart ssh    # Debian/Ubuntu; other distros may call it sshd
-```
-
-Note that with this enabled, sshd unlinks the old socket **unconditionally**
-before binding — which is exactly why `RemoteForward` must never sit in
-`~/.ssh/config` for the target host (see the warning above): short-lived
-connections would repeatedly steal the socket filename from the server's
-forward listener under the very same mechanism.
-
-Then self-test and use it for real:
-
-```bash
-# on the ssh server (the server's forward channel is already running,
-# regardless of your interactive sessions):
-sudogate-client test   # end-to-end self test: a review request reading
-                       # “sudogate-client self-test” pops up on the ssh client
-sudo -A <command>      # the real thing
-```
-
-**Review UI** — three ways, same server:
-
-- **omarchy panel** (what `make install-plugin` installs): a key badge
-  (🔑 + pending count) on the bar — urgent-red while requests wait, dimmed
-  gray (key + 0) when idle. By default the badge always occupies its slot, so
-  a glance tells you the panel is alive; set `hideWhenEmpty` to collapse it
-  while idle. Click to open the review card — host / user / cwd / full
-  command / countdown, password field (Enter = approve), deny button.
-  Deadline expiry rolls the queue and clears the password field automatically.
-  Upgrade anytime with `git pull && make install-plugin` (idempotent).
-- **Terminal TUI** (`make build` produces `build/sudogate-tui`): a
-  keyboard-only review panel — fsnotify watches the server state file
-  (zero polling), so new requests appear instantly; `j/k` to move, `r` to
-  deny, `Enter` opens a masked password prompt (Enter again = approve,
-  Esc = cancel), `q` quits; each row shows a per-request countdown, plus
-  **per-host forward health lights** (✓/✗ with last error, pushed on every
-  channel state change). Actions go through the same ctl socket as the panel
-  and CLI; if the server is down the TUI just says so and picks up
-  automatically once it is back — there is no connection to reconnect.
-- **CLI fallback** (any environment):
-
-  ```bash
-  sudogate-server status   # list pending requests
-  sudogate-server review   # review the oldest: shows the command, hidden password input;
-                           #   password + Enter = approve, empty Enter = deny
-  ```
-
-**Panel options** — set inline on the layout entry in
-`~/.config/omarchy/shell.json`; changes apply immediately (no shell restart):
-
-```jsonc
-{ "id": "tomaswade.sudogate", "hideWhenEmpty": true, "timeoutSec": 120 }
-```
-
-| Option | Default | Meaning |
-|---|---|---|
-| `hideWhenEmpty` | `false` | `false`: badge always visible (dimmed key + 0 when idle); `true`: badge hidden while the queue is empty |
-| `timeoutSec` | `120` | request deadline driving the countdown; keep in sync with the server's `-timeout` |
-| `runtimeDir` | `""` | directory holding `sudogate.sock.ctl` / `sudogate.state`; empty = `XDG_RUNTIME_DIR` |
-| `serverBin` | `""` | `sudogate-server` path used for approve/deny; empty = auto-detect (`~/.local/bin` first) |
-| `demo` | `false` | render canned requests (no server needed) for previewing the visuals |
+</details>
 
 ## Worked example (laptop → minipc)
 
@@ -250,8 +219,8 @@ confirmation for `sudo` commands works as Gate 1.
 agent wants root
   → Gate 1: agent tool asks "run sudo -A …?" — you approve the intent
   → agent runs sudo -A <cmd>
-  → sudogate-client forwards the request over your ssh session
-  → Gate 2: the key badge on your bar turns red; open the panel and
+  → sudogate-client forwards the request over the ssh forward
+  → Gate 2: a window pops up (or the key badge on your bar turns red) —
     read host / user / cwd / full command
   → command matches what Gate 1 just showed? type the password (Enter).
     Anything else — deny.
@@ -324,19 +293,30 @@ nameless — still looks ✓ in `forward list`. After migrating to the embedded
 forward, delete every sudogate-related `RemoteForward` line from
 `~/.ssh/config`.
 
-## Desktop popup approval (optional)
+## Review UIs
+
+All surfaces talk to the same server over its ctl socket; decisions are
+first-come-first-served — if one UI approves, the others see the entry
+disappear on their next state refresh.
+
+### Desktop popup
 
 The server has a built-in desktop popup: when a request arrives with the
 queue non-empty and no popup window open, it spawns a floating terminal
-window running `sudogate-tui`. When the queue drains (approved / denied /
-timed out / withdrawn by the requester), the TUI exits and the window
-disappears with it. The popup is never signal-killed by server
+window running `sudogate-tui`. When the queue drains the TUI exits and the
+window disappears with it. The popup is never signal-killed by server
 stop/restart (separate session + `KillMode=process` in the service unit);
 the window always closes gracefully through the TUI itself. Closing it
 with `q` abandons the current batch to the timeout, and only a **new
 request** pops it again (activity from other UIs never re-pops).
 
-### Enable / disable
+Close-up of the popup above — per-request countdown, working directory,
+request id, forward health, and the keyboard flow (`j/k` select, `r` deny,
+`Enter` password):
+
+![Close-up: the approval popup with one pending request](docs/screenshots/popup-closeup.webp)
+
+Enable / disable:
 
 ```bash
 sudogate-server popup on      # write the default kitty template and enable
@@ -344,12 +324,11 @@ sudogate-server popup status  # show state / template / window
 sudogate-server popup off     # disable
 ```
 
-### Config-as-terminal
-
-The switch is just a file: `~/.config/sudogate/popup.conf` (present =
-enabled; re-read on every trigger, so **edits take effect immediately**).
-Its content is the popup command template — the `{tui}` placeholder (must
-be a standalone word) expands to `sudogate-tui --until-empty`:
+**Config-as-terminal.** The switch is just a file:
+`~/.config/sudogate/popup.conf` (present = enabled; re-read on every
+trigger, so **edits take effect immediately**). Its content is the popup
+command template — the `{tui}` placeholder (a standalone word) expands to
+`sudogate-tui --until-empty`:
 
 ```bash
 kitty --app-id sudogate-approve --override initial_window_width=90c --override initial_window_height=26c --override remember_window_size=no -e {tui}
@@ -360,10 +339,9 @@ Switching terminals is a one-line edit (more templates in
 `alacritty --class sudogate-approve -e {tui}`, … The server knows nothing
 about terminals.
 
-### Floating window rule (Hyprland)
-
-New windows tile by default; for popup behavior add a float+center rule on
-the window class. With omarchy's lua config (`~/.config/hypr/`):
+**Floating window rule (Hyprland).** New windows tile by default; for popup
+behavior add a float+center rule on the window class. With omarchy's lua
+config (`~/.config/hypr/`):
 
 ```lua
 o.window({ class = "^sudogate-approve$" }, { float = true, size = "800 480", center = true })
@@ -371,15 +349,61 @@ o.window({ class = "^sudogate-approve$" }, { float = true, size = "800 480", cen
 
 Other WMs/DEs: use their window-rule syntax with the same class/app-id.
 Without a rule it still works — the window just tiles into the layout.
+Note: under a systemd user service the server inherits `WAYLAND_DISPLAY`
+from the session; on headless machines enabling this does nothing (spawn
+failures are logged only).
 
-### Notes
+### Terminal TUI
 
-- Running under a systemd user service the server inherits `WAYLAND_DISPLAY`
-  from the session; on headless machines enabling this does nothing (spawn
-  failures are logged only)
-- The template is whitespace-split, no quoting — terminal command lines
-  don't need it
-- Multi-monitor: the window opens on the monitor of the current workspace
+`make install-tui` installs `sudogate-tui` — the keyboard-only review panel
+the popup runs. Run it standalone anytime (`sudogate-tui`); it watches the
+server state file with fsnotify (zero polling), shows per-request countdowns
+and per-host forward health lights, and needs no reconnect: if the server is
+down the TUI says so and picks up automatically once it is back.
+
+Idle — the panel is alive, forwards healthy, nothing pending:
+
+![TUI idle state](docs/screenshots/tui-idle.webp)
+
+Approving — `Enter` on a request opens a masked password prompt (Enter again
+= approve, Esc = cancel); approval seals the password to that exact request:
+
+![TUI password prompt](docs/screenshots/tui-password-overview.webp)
+
+![Close-up: the masked password prompt](docs/screenshots/tui-password.webp)
+
+### omarchy panel
+
+`make install-plugin` installs the quickshell panel: a key badge (🔑 +
+pending count) on the bar — urgent-red while requests wait, dimmed gray
+(key + 0) when idle. Click to open the review card:
+
+![omarchy panel: expanded review card with password field and countdown](docs/screenshots/panel.webp)
+
+Panel options — set inline on the layout entry in
+`~/.config/omarchy/shell.json`; changes apply immediately (no shell restart):
+
+```jsonc
+{ "id": "tomaswade.sudogate", "hideWhenEmpty": true, "timeoutSec": 120 }
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `hideWhenEmpty` | `false` | `false`: badge always visible (dimmed key + 0 when idle); `true`: badge hidden while the queue is empty |
+| `timeoutSec` | `120` | request deadline driving the countdown; keep in sync with the server's `-timeout` |
+| `runtimeDir` | `""` | directory holding `sudogate.sock.ctl` / `sudogate.state`; empty = `XDG_RUNTIME_DIR` |
+| `serverBin` | `""` | `sudogate-server` path used for approve/deny; empty = auto-detect (`~/.local/bin` first) |
+| `demo` | `false` | render canned requests (no server needed) for previewing the visuals |
+
+### CLI
+
+Any environment, no UI dependencies:
+
+```bash
+sudogate-server status   # list pending requests
+sudogate-server review   # review the oldest: shows the command, hidden password input;
+                         #   password + Enter = approve, empty Enter = deny
+```
 
 ## Architecture
 
@@ -391,8 +415,8 @@ sudo -A <cmd>
      · captures real command via ps(1)
      · one-time X25519 keypair
           │ ── ssh -R unix socket ──▶ sudogate-server (systemd --user)
-          │   (dedicated channel managed by         │ review UI: omarchy panel
-          │    the server itself; independent       │ / TUI / CLI
+          │   (dedicated channel managed by         │ review UIs: desktop popup
+          │    the server itself; independent       │ / TUI / omarchy panel / CLI
           │    of tools & interactive sessions)     │ operator types password
           │    request {cmd, id, pubkey}            │
           ◀─ sealed password + signature ───────────┘
@@ -404,15 +428,17 @@ sudo -A <cmd>
   forwarded from each ssh server, queues requests, seals and signs responses;
   **embedded forward management** (one supervised `ssh -N -R` child per
   target, backoff restarts, lifetime bound to the server, persisted in
-  `forward.conf`); runs as a systemd --user service; embeds the private key.
-  `sudogate-client` (ssh server): the askpass helper; embeds the public key
-  and nothing else, runs on demand per sudo invocation, copy it to any number
-  of hosts. `sudogate-tui` (ssh client): terminal review panel (built by
-  `make build`), watches the state file with fsnotify, includes per-host
-  forward health lights. `plugin/` (ssh client): the omarchy quickshell
-  review panel — watches the server's state file with inotify (no polling),
-  approves/denies via the server's control subcommands, password travels via
-  stdin.
+  `forward.conf`); **embedded desktop popup** (template-driven terminal
+  spawn, config-as-terminal, no terminal knowledge in the server); runs as a
+  systemd --user service; embeds the private key. `sudogate-client` (ssh
+  server): the askpass helper; embeds the public key and nothing else, runs
+  on demand per sudo invocation, copy it to any number of hosts.
+  `sudogate-tui` (ssh client): terminal review panel (built by `make
+  build`), watches the state file with fsnotify, includes per-host forward
+  health lights; `--until-empty` exits when the queue drains (popup mode).
+  `plugin/` (ssh client): the omarchy quickshell review panel — watches the
+  server's state file with inotify (no polling), approves/denies via the
+  server's control subcommands, password travels via stdin.
 - **Trust & crypto** — transport auth/encryption inherited from ssh; response
   origin proven by an Ed25519 signature over `id ‖ SHA256(cmd) ‖ SHA256(pubkey)`
   against the compiled-in public key; password sealed with XChaCha20-Poly1305

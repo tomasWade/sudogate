@@ -11,6 +11,9 @@ Restart=on-failure
 # mixed 都会在主进程退出后清理剩余进程、杀掉弹窗。转发通道不受影响：
 # 正常退出走 Shutdown，崩溃由 Pdeathsig 兜底。
 KillMode=process
+# 崩溃不落 core dump：进程内存里有待 GC 的密码字符串与私钥，
+# 内存快照落盘 = 密钥材料落盘。排障靠 journal，不靠 core。
+LimitCORE=0
 
 [Install]
 WantedBy=default.target
