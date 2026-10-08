@@ -29,11 +29,6 @@ type Options struct {
 	ForwardConfPath string
 }
 
-type pendingConn struct {
-	req  proto.Request
-	conn net.Conn
-}
-
 type Entry struct {
 	ID      string    `json:"id"`
 	Host    string    `json:"host"`
@@ -41,7 +36,8 @@ type Entry struct {
 	Command string    `json:"command"`
 	CWD     string    `json:"cwd"`
 	Created time.Time `json:"created"`
-	conns   []*pendingConn
+	epub    string    // client 的临时公钥（base64），批准时封装密码
+	conn    net.Conn  // 请求方连接；断连即撤销本条（clientGone）
 	timer   *time.Timer
 }
 
@@ -71,7 +67,6 @@ type auditEntry struct {
 	CWD        string `json:"cwd"`
 	Decision   string `json:"decision"`
 	DurationMS int64  `json:"duration_ms"`
-	Conns      int    `json:"conns"`
 }
 
 type Server struct {
@@ -79,9 +74,9 @@ type Server struct {
 	priv ed25519.PrivateKey
 	fwd  *ForwardManager
 
-	mu       sync.Mutex
-	entries  map[string]*Entry
-	mergeIdx map[string]string
+	mu           sync.Mutex
+	entries      map[string]*Entry
+	shuttingDown bool // closeAll 后置位：迟到的握手连接不再入队（见 addPending）
 }
 
 func New(priv ed25519.PrivateKey, opt Options) *Server {
@@ -92,10 +87,9 @@ func New(priv ed25519.PrivateKey, opt Options) *Server {
 		opt.MaxPending = 5
 	}
 	s := &Server{
-		opt:      opt,
-		priv:     priv,
-		entries:  map[string]*Entry{},
-		mergeIdx: map[string]string{},
+		opt:     opt,
+		priv:    priv,
+		entries: map[string]*Entry{},
 	}
 	if opt.ForwardConfPath != "" {
 		s.fwd = NewForwardManager(opt.ForwardConfPath, opt.SocketPath)
@@ -143,6 +137,7 @@ func (s *Server) Run() error {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh) // 测试内多次 Run/停启时不残留全局信号注册
 	go func() {
 		<-sigCh
 		ln.Close()
@@ -171,26 +166,32 @@ func (s *Server) Run() error {
 		dataWG.Add(1)
 		go func() { defer dataWG.Done(); s.handleData(c) }()
 	}
+	// 必须在 dataWG.Wait() 之前关闭所有 pending 连接：handleData 此刻
+	// 阻塞在取消探测读上，只有关掉对端连接才能让它们返回（clientGone
+	// 对已清空的 entries 幂等 no-op）。否则有 pending 时收到 SIGINT 会
+	// 死等各 client 自行断连（最长 120s），被 systemd SIGKILL 后丢掉
+	// 转发下线、最终 state 与审计。
+	s.closeAll()
 	dataWG.Wait()
 	ctlWG.Wait()
 	if s.fwd != nil {
 		s.fwd.Shutdown()
 	}
-	s.closeAll()
 	return nil
 }
 
 func (s *Server) closeAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.shuttingDown = true
+	// 关机丢弃也要留审计痕：否则 audit.jsonl 里无法区分"server 停机时
+	// 还有未决请求"与"请求从未发生"。
 	for _, e := range s.entries {
-		for _, pc := range e.conns {
-			pc.conn.Close()
-		}
+		e.conn.Close()
 		e.timer.Stop()
+		s.appendAudit(e, "shutdown")
 	}
 	s.entries = map[string]*Entry{}
-	s.mergeIdx = map[string]string{}
 	s.writeStateLocked()
 }
 
@@ -214,17 +215,50 @@ func (s *Server) handleData(conn net.Conn) {
 		conn.Close()
 		return
 	}
+	// 取消感知：askpass 协议里 client 发完请求帧后不会再发任何数据，
+	// 所以本连接上任何 Read 返回（EOF/RST/数据/超时）都意味着 client
+	// 已消失——远端 sudo 被 Ctrl+C、askpass 被杀等。阻塞发生在本连接
+	// 专属的 goroutine 里，不影响其他请求的并发处理。必须先清掉握手期
+	// 的 10s ReadDeadline，否则会把 deadline 到期误判为 client 断连；
+	// 清 deadline 失败（实践不可达）则放弃探测——条目交由审批/超时收尾，
+	// 不能在此直接撤销（否则刚入队就自撤）。
+	if conn.SetReadDeadline(time.Time{}) == nil {
+		var b [1]byte
+		conn.Read(b[:])
+		s.clientGone(req.ID)
+	}
+}
+
+// clientGone 撤销一条因请求方断连而失效的 pending（幂等：条目已被
+// 批准/拒绝/超时移除时为 no-op，与 Approve/Deny/expire 的竞态由 s.mu
+// 串行化，先到先生效）。
+func (s *Server) clientGone(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.entries[id]
+	if e == nil {
+		return
+	}
+	e.conn.Close()
+	e.timer.Stop()
+	delete(s.entries, id)
+	s.writeStateLocked()
+	s.appendAudit(e, "cancelled")
 }
 
 func (s *Server) addPending(req *proto.Request, conn net.Conn) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := req.Host + "\x00" + req.Command
-	if id, ok := s.mergeIdx[key]; ok {
-		e := s.entries[id]
-		e.conns = append(e.conns, &pendingConn{req: *req, conn: conn})
-		return nil
+	// 关机竞态防护：信号到达后 closeAll 已清空队列，但一个在关机前
+	// 刚被 accept、还在 10s 握手窗内的连接此刻才完成读帧——若放它
+	// 入队，其取消探测读会让 dataWG.Wait() 再死等一个完整超时周期。
+	// 关机中一律拒绝（client 收 busy 响应后退出）。
+	if s.shuttingDown {
+		return errors.New("busy")
 	}
+	// 刻意不做同 host+command 合并：认证可以共享，但命令执行不能并行
+	// （apt/dpkg 等文件锁会让并行放行的一半直接失败）。每条请求独立
+	// 条目、独立倒计时，人工逐条批准的节奏天然把执行串行化。
 	if len(s.entries) >= s.opt.MaxPending {
 		return errors.New("busy")
 	}
@@ -233,11 +267,11 @@ func (s *Server) addPending(req *proto.Request, conn net.Conn) error {
 		ID: id, Host: req.Host, User: req.User,
 		Command: req.Command, CWD: req.CWD,
 		Created: time.Now(),
-		conns:   []*pendingConn{{req: *req, conn: conn}},
+		epub:    req.EPub,
+		conn:    conn,
 	}
 	e.timer = time.AfterFunc(s.opt.Timeout, func() { s.expire(id) })
 	s.entries[id] = e
-	s.mergeIdx[key] = id
 	s.writeStateLocked()
 	return nil
 }
@@ -259,35 +293,30 @@ func (s *Server) Approve(id, password string) error {
 	if e == nil {
 		return fmt.Errorf("no pending request %s", id)
 	}
-	idBytes, err := hex.DecodeString(id)
+	idBytes, err := hex.DecodeString(e.ID)
 	if err != nil {
 		s.finishLocked(e, proto.ReasonDenied, "denied")
 		return err
 	}
-	_ = idBytes
-	for _, pc := range e.conns {
-		pcID, err := hex.DecodeString(pc.req.ID)
-		if err != nil {
-			continue
-		}
-		epub, err := base64.StdEncoding.DecodeString(pc.req.EPub)
-		if err != nil {
-			continue
-		}
-		sl, err := seal.SealPassword(epub, pcID, pc.req.Command, password)
-		if err != nil {
-			continue
-		}
-		sig := seal.Sign(s.priv, pcID, pc.req.Command, epub)
-		resp := &proto.Response{
-			V: proto.Version, OK: true, ID: pc.req.ID,
-			Seal: sl,
-			Sig:  base64.StdEncoding.EncodeToString(sig),
-		}
-		pc.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		proto.WriteFrame(pc.conn, resp)
-		pc.conn.Close()
+	epub, err := base64.StdEncoding.DecodeString(e.epub)
+	if err != nil {
+		s.finishLocked(e, proto.ReasonDenied, "denied")
+		return err
 	}
+	sl, err := seal.SealPassword(epub, idBytes, e.Command, password)
+	if err != nil {
+		s.finishLocked(e, proto.ReasonDenied, "denied")
+		return err
+	}
+	sig := seal.Sign(s.priv, idBytes, e.Command, epub)
+	resp := &proto.Response{
+		V: proto.Version, OK: true, ID: e.ID,
+		Seal: sl,
+		Sig:  base64.StdEncoding.EncodeToString(sig),
+	}
+	e.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	proto.WriteFrame(e.conn, resp)
+	e.conn.Close()
 	s.finishLocked(e, "", "approved")
 	return nil
 }
@@ -305,15 +334,12 @@ func (s *Server) Deny(id string) error {
 
 func (s *Server) finishLocked(e *Entry, reason, decision string) {
 	if reason != "" {
-		for _, pc := range e.conns {
-			pc.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			proto.WriteFrame(pc.conn, &proto.Response{V: proto.Version, OK: false, ID: e.ID, Reason: reason})
-			pc.conn.Close()
-		}
+		e.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		proto.WriteFrame(e.conn, &proto.Response{V: proto.Version, OK: false, ID: e.ID, Reason: reason})
+		e.conn.Close()
 	}
 	e.timer.Stop()
 	delete(s.entries, e.ID)
-	delete(s.mergeIdx, e.Host+"\x00"+e.Command)
 	s.writeStateLocked()
 	s.appendAudit(e, decision)
 }
@@ -364,7 +390,6 @@ func (s *Server) appendAudit(e *Entry, decision string) {
 		User: e.User, Command: e.Command, CWD: e.CWD,
 		Decision:   decision,
 		DurationMS: time.Since(e.Created).Milliseconds(),
-		Conns:      len(e.conns),
 	}
 	b, _ := json.Marshal(entry)
 	os.MkdirAll(filepath.Dir(s.opt.AuditPath), 0o700)

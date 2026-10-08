@@ -299,8 +299,9 @@ echo "${SUDO_ASKPASS:-MISSING}"
 | Timeout (default 120s) | exit 1, timeout error on stderr     |
 
 The wait is a human reading the command — agents should treat blocking as
-normal and not retry-loop a pending request (identical concurrent commands
-are merged into one review anyway).
+normal and not retry-loop a pending request. If the agent is killed (Ctrl+C),
+the pending review disappears instantly; identical concurrent commands each
+get their own review, approved one by one.
 
 ## When a tool such as herdr runs the ssh for you
 
@@ -374,7 +375,9 @@ sudo -A <cmd>
 | Empty input          | 1 only            | treated as deny                 |
 
 Concurrent requests are sealed and decided independently; identical concurrent
-commands are merged into one review.
+commands get separate reviews (approving them one by one naturally serializes
+executions that would otherwise fight over locks like apt/dpkg). A client that
+disconnects (Ctrl+C) cancels its own review immediately.
 
 ## Troubleshooting
 
