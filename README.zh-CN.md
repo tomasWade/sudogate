@@ -2,6 +2,7 @@
 
 **逆向 askpass** —— ssh 服务器上 AI agent 的 sudo 密码提示，送到你面前这台机器。
 
+[![test](https://github.com/tomasWade/sudogate/actions/workflows/test.yml/badge.svg)](https://github.com/tomasWade/sudogate/actions/workflows/test.yml)
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 ## 为什么

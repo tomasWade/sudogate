@@ -2,6 +2,7 @@
 
 **Reverse askpass** — sudo password prompts from AI agents on ssh servers, delivered to the machine you're sitting at.
 
+[![test](https://github.com/tomasWade/sudogate/actions/workflows/test.yml/badge.svg)](https://github.com/tomasWade/sudogate/actions/workflows/test.yml)
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 ## Why
