@@ -435,7 +435,11 @@ Panel {
     stdout: SplitParser {
       splitMarker: "\n"
 
-      onRead: if (read.trim() === "sudogate.state") catDebounce.restart()
+      // 信号参数必须以具名函数形式接收（裸表达式引用 read 会拿到
+      // undefined，过滤永远不通过——面板失聪）
+      onRead: function(data) {
+        if (data.trim() === "sudogate.state") catDebounce.restart()
+      }
     }
 
     onExited: watchRetryTimer.restart()
