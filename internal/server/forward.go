@@ -330,7 +330,7 @@ func (m *ForwardManager) spawn(h *fwdHost) error {
 		"-R", h.remotePath+":"+m.sockPath,
 		h.host,
 	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
+	withPdeathsig(cmd) // Linux：父死即 SIGTERM；其他平台 no-op（见 procattr_other.go）
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	// stderr 走 pipe 时，Wait 会等所有持有写端的孙进程退出（如 sh 脚本

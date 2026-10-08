@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 )
 
 // PopupManager：请求到达时在桌面弹出审批终端窗口（kitty 等）。
@@ -97,8 +96,9 @@ func (p *PopupManager) Notify(pendingLen int) {
 	}
 	c := exec.Command(args[0], args[1:]...)
 	// 新会话：弹窗独立成组，server 退出/重启不牵连（无 Pdeathsig，
-	// 有 setsid）；GUI 所需的 WAYLAND_DISPLAY 等继承自 server 环境。
-	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// 不被信号强杀；清空队列经 TUI 优雅退出）。GUI 所需的
+	// WAYLAND_DISPLAY 等继承自 server 环境。
+	withSetsid(c)
 	if err := c.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "sudogate popup: spawn %s: %v\n", args[0], err)
 		return
