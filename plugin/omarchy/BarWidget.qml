@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 // Bar entry point: the pending-review badge. By default the badge always
 // occupies its bar slot (dimmed key + 0 when idle) so the plugin presence —
@@ -100,8 +101,8 @@ BarWidget {
   implicitHeight: barSize
 
   readonly property color badgeColor: pendingCount > 0
-    ? (root.bar ? root.bar.urgent : Color.urgent)
-    : (root.bar ? root.bar.barForeground : Color.foreground)
+    ? (root.bar ? root.bar.urgent : Commons.Color.urgent)
+    : (root.bar ? root.bar.barForeground : Commons.Color.foreground)
   readonly property real badgeOpacity: pendingCount > 0 ? 1 : 0.45
 
   Item {
