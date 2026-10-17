@@ -1,12 +1,14 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // PopupManager：请求到达时在桌面弹出审批终端窗口（kitty 等）。
@@ -24,7 +26,9 @@ import (
 type PopupManager struct {
 	mu       sync.Mutex
 	confPath string
-	tuiPath  string // 替换 {tui} 的目标（绝对路径，测试可注入假脚本）
+	tuiPath  string   // 替换 {tui} 的目标（绝对路径，测试可注入假脚本）
+	envCmd   []string // 查询 user manager 环境的命令（构造时填默认，测试可注入假脚本）
+	envExtra []string // 成功回填的图形变量缓存（触发时现查，见 graphicalEnv）
 	cmd      *exec.Cmd
 }
 
@@ -33,7 +37,11 @@ func NewPopupManager(confPath, tuiPath string) *PopupManager {
 	if tuiPath == "" {
 		tuiPath = locateTUI()
 	}
-	return &PopupManager{confPath: confPath, tuiPath: tuiPath}
+	return &PopupManager{
+		confPath: confPath,
+		tuiPath:  tuiPath,
+		envCmd:   []string{"systemctl", "--user", "show-environment"},
+	}
 }
 
 // locateTUI 探测 sudogate-tui：server 跑在 systemd user service 里时
@@ -95,6 +103,17 @@ func (p *PopupManager) Notify(pendingLen int) {
 		return
 	}
 	c := exec.Command(args[0], args[1:]...)
+	// 终端自身的报错（连不上 compositor 当场退出之类）接入 server 的
+	// stderr（systemd 下即 journal）：Start 成功后的运行期失败默认只会
+	// 进 /dev/null，弹窗"静默不弹"无从排障。
+	c.Stdout = os.Stderr
+	c.Stderr = os.Stderr
+	// Linger=yes + WantedBy=default.target 时 server 随 user manager
+	// 开机早于图形会话启动，WAYLAND_DISPLAY 等不在进程环境里——spawn
+	// 前从 user manager 现查回填缺失的图形变量给子进程。
+	if extra := p.graphicalEnv(); len(extra) > 0 {
+		c.Env = append(os.Environ(), extra...)
+	}
 	// 新会话：弹窗独立成组，server 退出/重启不牵连（无 Pdeathsig，
 	// 不被信号强杀；清空队列经 TUI 优雅退出）。GUI 所需的
 	// WAYLAND_DISPLAY 等继承自 server 环境。
@@ -112,6 +131,51 @@ func (p *PopupManager) Notify(pendingLen int) {
 		}
 		p.mu.Unlock()
 	}()
+}
+
+// graphicalEnv 返回 spawn 弹窗前需补给子进程的图形环境变量。
+//
+// 背景：server 以 systemd --user 服务运行且 Linger=yes 时随 user
+// manager 在开机时启动——早于图形会话把 WAYLAND_DISPLAY/DISPLAY 导入
+// manager 环境；此后导入发生也不回填运行中的进程。直接 spawn 的终端
+// 连不上 compositor、当场退出，弹窗表现为"静默不弹"（请求本身已到，
+// 面板等其他界面照常）。这里在触发时用 manager 环境补齐本进程缺失的
+// 图形变量：成功结果缓存（避免每次请求都 exec），查不到不缓存——图形
+// 会话可能晚到，下次触发再试。无头机器上两处都没有，返回空 = 维持
+// 原行为（spawn 失败报错进日志）。
+//
+// 调用方持有 p.mu；2s 超时防止 DBUS 卡顿拖住 Notify。
+func (p *PopupManager) graphicalEnv() []string {
+	var missing []string
+	for _, k := range []string{"WAYLAND_DISPLAY", "DISPLAY"} {
+		if os.Getenv(k) == "" {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) == 0 || p.envExtra != nil {
+		return p.envExtra
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, p.envCmd[0], p.envCmd[1:]...).Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sudogate popup: 查询用户管理器环境失败: %v\n", err)
+		return nil
+	}
+	var backfilled []string
+	for _, line := range strings.Split(string(out), "\n") {
+		for _, k := range missing {
+			if strings.HasPrefix(line, k+"=") {
+				p.envExtra = append(p.envExtra, line)
+				backfilled = append(backfilled, k)
+			}
+		}
+	}
+	if len(backfilled) > 0 {
+		fmt.Fprintf(os.Stderr, "sudogate popup: 进程缺图形环境，已从 systemd --user 回填: %s\n",
+			strings.Join(backfilled, ", "))
+	}
+	return p.envExtra
 }
 
 // expandTemplate：按空白切分模板，独立 token "{tui}" 展开为

@@ -328,8 +328,10 @@ o.window({ class = "^sudogate-approve$" }, { float = true, size = "800 480", cen
 
 其他 WM/DE 用各自的窗口规则语法按同样的 class/app-id 匹配；不配规则
 也能用，只是窗口平铺进布局。注意：server 以 systemd user service 运行
-时从会话继承 `WAYLAND_DISPLAY`；无图形环境的机器上开启无效（spawn
-失败仅记日志）。
+时从会话继承 `WAYLAND_DISPLAY`；`Linger=yes` 时服务随开机启动、**早于**
+图形会话导入环境——因此 server 每次弹窗前会从 user manager 环境现查，
+把缺失的 `WAYLAND_DISPLAY`/`DISPLAY` 回填给子进程（会话晚到也能在下次
+触发时补上）。无图形环境的机器上开启无效（spawn 失败记入 journal）。
 
 ### 终端 TUI
 
@@ -434,6 +436,12 @@ flowchart LR
 
 ## 排障
 
+- **弹窗不弹而面板/插件正常** —— 请求到了 server，只是 popup 这条腿
+  断了。典型原因：server（`Linger=yes` 随开机启动）没赶上图形会话的
+  环境导入，spawn 的终端连不上 compositor 当场退出。现版本每次弹窗前
+  会自动从 user manager 回填图形变量；仍不弹时看
+  `journalctl --user -u sudogate`（终端报错已接入 journal），
+  `systemctl --user restart sudogate` 可立即恢复。
 - **`sudo: no askpass program specified`** —— `SUDO_ASKPASS` 没到达
   sudo 进程。agent 的 shell 非交互、不读 rc 文件；环境链见
   [与 agent 协作](#与-agent-协作)。

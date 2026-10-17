@@ -198,3 +198,71 @@ func TestPopupOnOff(t *testing.T) {
 		t.Fatal("PopupOff 幂等失败")
 	}
 }
+
+// graphicalEnv：进程缺图形变量时从 user manager 环境回填缺失项；成功
+// 后缓存（不再重复查询），查不到不缓存——图形会话可能晚到，下次再试。
+func TestPopupGraphicalEnvBackfill(t *testing.T) {
+	dir := t.TempDir()
+	queries := filepath.Join(dir, "queries.log")
+	envSh := filepath.Join(dir, "fake-systemctl.sh")
+	script := "#!/bin/sh\necho q >> \"" + queries + "\"\nprintf 'PATH=/usr/bin\\nWAYLAND_DISPLAY=wayland-9\\nDISPLAY=:9\\n'\n"
+	if err := os.WriteFile(envSh, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("DISPLAY", "")
+	p := NewPopupManager(filepath.Join(dir, "none.conf"), "")
+	p.envCmd = []string{envSh}
+
+	got := p.graphicalEnv()
+	if len(got) != 2 || got[0] != "WAYLAND_DISPLAY=wayland-9" || got[1] != "DISPLAY=:9" {
+		t.Fatalf("应回填缺失的两个图形变量，got %v", got)
+	}
+	p.graphicalEnv() // 应命中缓存
+	if b, err := os.ReadFile(queries); err != nil || strings.Count(string(b), "\n") != 1 {
+		t.Fatalf("成功回填后应缓存（仅查询 1 次），err=%v", err)
+	}
+
+	// 查不到：返回 nil 且不缓存（下次触发重查，等会话晚到）
+	miss := filepath.Join(dir, "miss.sh")
+	if err := os.WriteFile(miss, []byte("#!/bin/sh\nprintf 'PATH=/usr/bin\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p2 := NewPopupManager(filepath.Join(dir, "none.conf"), "")
+	p2.envCmd = []string{miss}
+	if got := p2.graphicalEnv(); got != nil {
+		t.Fatalf("manager 环境无图形变量应返回 nil，got %v", got)
+	}
+	p2.graphicalEnv()
+	if p2.envExtra != nil {
+		t.Fatal("未命中不得缓存")
+	}
+}
+
+// Notify spawn 的子进程实际拿到回填的图形变量（c.Env 注入链路）——
+// 模拟 Linger 开机早启、进程没赶上会话环境导入的 server。
+func TestPopupSpawnInheritsBackfilledEnv(t *testing.T) {
+	dir := t.TempDir()
+	envSh := filepath.Join(dir, "fake-systemctl.sh")
+	if err := os.WriteFile(envSh, []byte("#!/bin/sh\nprintf 'WAYLAND_DISPLAY=wayland-9\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("DISPLAY", "")
+	// "终端"假脚本：把自己看到的 WAYLAND_DISPLAY 落盘后睡住
+	term := filepath.Join(dir, "fake-term.sh")
+	if err := os.WriteFile(term, []byte("#!/bin/sh\nprintenv WAYLAND_DISPLAY >> \""+filepath.Join(dir, "env.log")+"\"\nexec sleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(dir, "popup.conf")
+	if err := os.WriteFile(conf, []byte(term+" {tui}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := NewPopupManager(conf, writeFakeTUI(t, dir))
+	p.envCmd = []string{envSh}
+	p.Notify(1)
+	waitCond(t, 3*time.Second, func() bool {
+		b, err := os.ReadFile(filepath.Join(dir, "env.log"))
+		return err == nil && strings.Count(string(b), "wayland-9") == 1
+	})
+}

@@ -357,8 +357,12 @@ o.window({ class = "^sudogate-approve$" }, { float = true, size = "800 480", cen
 Other WMs/DEs: use their window-rule syntax with the same class/app-id.
 Without a rule it still works — the window just tiles into the layout.
 Note: under a systemd user service the server inherits `WAYLAND_DISPLAY`
-from the session; on headless machines enabling this does nothing (spawn
-failures are logged only).
+from the session. With `Linger=yes` the service starts at boot, *before*
+the graphical session imports its environment — so before each spawn the
+server re-reads the user manager environment and backfills missing
+`WAYLAND_DISPLAY`/`DISPLAY` into the child (late-arriving sessions are
+picked up on the next trigger). On headless machines enabling this does
+nothing (spawn failures are logged to the journal).
 
 ### Terminal TUI
 
@@ -470,6 +474,14 @@ disconnects (Ctrl+C) cancels its own review immediately.
 
 ## Troubleshooting
 
+- **Popup never appears while the panel/plugin works** — requests reach the
+  server; only the popup leg is broken. Typical cause: the server (started
+  at boot via `Linger=yes`) missed the graphical session's environment
+  import, so the spawned terminal cannot reach the compositor and exits
+  instantly. Current builds backfill `WAYLAND_DISPLAY`/`DISPLAY` from the
+  user manager before each spawn; if it still fails, check
+  `journalctl --user -u sudogate` (terminal errors go to the journal) —
+  `systemctl --user restart sudogate` restores it immediately.
 - **`sudo: no askpass program specified`** — `SUDO_ASKPASS` never reached the
   sudo process. Agent shells are non-interactive and read no rc files; see
   [Working with agents](#working-with-agents) for the environment chain.
