@@ -222,6 +222,52 @@ func (m *ForwardManager) Remove(host string) error {
 	return err
 }
 
+// Refresh 强制重建转发通道：host 为空重建全部，否则只重建指定主机
+// （支持 host 或 host:/path 写法，路径仅用于定位，沿用已配置值）。
+// 无论目标当前 ✓/✗，一律换新 supervisor——这是修"Running 假阳"的唯一
+// 入口：NAT 半开、远端 sshd 重启、转发 socket 被抢后，ssh 进程可能活着
+// 而隧道已死，此时 List 显示 ✓、退避重试也永远不会触发，只有换进程
+// 才能救。换新即清零 Restarts/LastErr 并从快首试（250ms）重新开始。
+func (m *ForwardManager) Refresh(host string) error {
+	m.mu.Lock()
+	olds := make([]*fwdHost, 0, len(m.hosts))
+	if host == "" {
+		for _, h := range m.hosts {
+			olds = append(olds, m.restartHostLocked(h.host, h.remotePath))
+		}
+	} else {
+		name, _, ok := parseForwardLine(host)
+		if !ok {
+			m.mu.Unlock()
+			return fmt.Errorf("invalid target %q", host)
+		}
+		h, exists := m.hosts[name]
+		if !exists {
+			m.mu.Unlock()
+			return fmt.Errorf("unknown host %q (see forward list)", name)
+		}
+		olds = append(olds, m.restartHostLocked(h.host, h.remotePath))
+	}
+	m.mu.Unlock()
+	// 旧实例锁外并行收割：单台最坏 SIGTERM→2s→SIGKILL，若被杀的 ssh 留下
+	// 持有管道的孤儿孙进程，cmd.Wait 还要再等 WaitDelay 3s，合计 ≈5s——
+	// 并行之下总时长仍是 max 而非 sum，ctl 的 10s 期限可容纳。换新即
+	// spawn 的新 ssh 与未死透的旧 ssh 竞争远端 bind：失败按
+	// ExitOnForwardFailure 退出后 250ms 起退避自愈——与 Remove 锁外收割
+	// 竞态的约定一致。
+	var wg sync.WaitGroup
+	for _, old := range olds {
+		wg.Add(1)
+		go func(old *fwdHost) {
+			defer wg.Done()
+			m.stopHost(old)
+		}(old)
+	}
+	wg.Wait()
+	m.notify() // 锁外，理由同 Add
+	return nil
+}
+
 // startHost 是 startHostLocked 的加锁包装（测试与未来调用方使用）。
 func (m *ForwardManager) startHost(host, remotePath string) {
 	m.mu.Lock()
@@ -229,11 +275,25 @@ func (m *ForwardManager) startHost(host, remotePath string) {
 	m.startHostLocked(host, remotePath)
 }
 
-// startHostLocked 要求调用方持有 m.mu。
+// startHostLocked 要求调用方持有 m.mu；已存在为 no-op。
 func (m *ForwardManager) startHostLocked(host, remotePath string) {
 	if _, ok := m.hosts[host]; ok {
 		return
 	}
+	m.hosts[host] = m.newHostLocked(host, remotePath)
+}
+
+// restartHostLocked 要求调用方持有 m.mu：无条件为 host 换上全新
+// supervisor，返回被替换的旧实例供锁外收割。map 全程不缺项——并发的
+// Remove 触发 rewriteConfLocked 时不会因条目缺席而清空配置。
+func (m *ForwardManager) restartHostLocked(host, remotePath string) *fwdHost {
+	old := m.hosts[host]
+	m.hosts[host] = m.newHostLocked(host, remotePath)
+	return old
+}
+
+// newHostLocked 构造并拉起一台主机的 supervisor（要求持有 m.mu）。
+func (m *ForwardManager) newHostLocked(host, remotePath string) *fwdHost {
 	h := &fwdHost{
 		host:       host,
 		remotePath: remotePath,
@@ -241,8 +301,8 @@ func (m *ForwardManager) startHostLocked(host, remotePath string) {
 		stopped:    make(chan struct{}),
 		state:      ForwardState{Host: host, RemotePath: remotePath},
 	}
-	m.hosts[host] = h
 	go m.supervise(h)
+	return h
 }
 
 // stopHost 发出停止信号并等待 supervisor 收场。sync.Once 保证并发调用

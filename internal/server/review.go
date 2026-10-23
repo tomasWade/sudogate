@@ -68,10 +68,10 @@ func RunReview(ctlPath, idArg string) int {
 	return 0
 }
 
-// RunForward 管理 CLI 的 forward 子命令：list / add / remove。
+// RunForward 管理 CLI 的 forward 子命令：list / add / remove / refresh。
 func RunForward(ctlPath string, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "用法: sudogate-server forward [-socket 路径] list|add <host>|remove <host>")
+		fmt.Fprintln(os.Stderr, "用法: sudogate-server forward [-socket 路径] list|add <host>|remove <host>|refresh [<host>]")
 		return 2
 	}
 	var req *CtlRequest
@@ -90,6 +90,19 @@ func RunForward(ctlPath string, args []string) int {
 			return 2
 		}
 		req = &CtlRequest{Op: "forward-remove", Host: args[1]}
+	case "refresh":
+		if len(args) > 2 {
+			fmt.Fprintln(os.Stderr, "refresh 至多一个 <host> 参数（缺省=全部重建）")
+			return 2
+		}
+		if len(args) == 2 && args[1] == "" {
+			fmt.Fprintln(os.Stderr, "refresh 需要 <host>（缺省=全部重建；空串会被 omitempty 吞成全量，故显式拒绝）")
+			return 2
+		}
+		req = &CtlRequest{Op: "forward-refresh"}
+		if len(args) == 2 {
+			req.Host = args[1]
+		}
 	default:
 		fmt.Fprintln(os.Stderr, "未知子命令:", args[0])
 		return 2
@@ -103,22 +116,30 @@ func RunForward(ctlPath string, args []string) int {
 		fmt.Fprintln(os.Stderr, "sudogate: forward 失败:", r.Error)
 		return 1
 	}
-	if args[0] == "list" {
-		if len(r.Forwards) == 0 {
-			fmt.Println("无转发通道（add <host> 添加）")
-			return 0
-		}
-		for _, f := range r.Forwards {
-			mark := "✗"
-			if f.Running {
-				mark = "✓"
-			}
-			fmt.Printf("%s %-24s 重启%-3d %s\n", mark, f.Host, f.Restarts, f.LastErr)
-		}
-	} else {
+	switch args[0] {
+	case "list":
+		printForwards(r.Forwards)
+	case "refresh":
+		fmt.Println("已刷新，状态如下（✓/✗ 数秒内稳定）")
+		printForwards(r.Forwards)
+	default:
 		fmt.Println("完成")
 	}
 	return 0
+}
+
+func printForwards(fs []ForwardState) {
+	if len(fs) == 0 {
+		fmt.Println("无转发通道（add <host> 添加）")
+		return
+	}
+	for _, f := range fs {
+		mark := "✗"
+		if f.Running {
+			mark = "✓"
+		}
+		fmt.Printf("%s %-24s 重启%-3d %s\n", mark, f.Host, f.Restarts, f.LastErr)
+	}
 }
 
 func errOr(r *CtlReply, err error) string {

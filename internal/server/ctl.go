@@ -74,6 +74,16 @@ func (s *Server) handleCtl(conn net.Conn) {
 			reply.OK = false
 			reply.Error = err.Error()
 		}
+	case "forward-refresh":
+		if s.fwd == nil {
+			reply.OK = false
+			reply.Error = "forward manager disabled"
+		} else if err := s.fwd.Refresh(req.Host); err != nil {
+			reply.OK = false
+			reply.Error = err.Error()
+		} else {
+			reply.Forwards = s.fwd.List()
+		}
 	case "popup":
 		if s.popup == nil {
 			reply.OK = false

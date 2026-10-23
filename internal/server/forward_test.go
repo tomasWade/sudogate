@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,11 +10,23 @@ import (
 	"time"
 )
 
-// stubSSH 生成一个长眠脚本冒充 ssh，避免测试真连 DNS/网络。
+// stubSSH 生成一个长眠脚本冒充 ssh，避免测试真连 DNS/网络。exec 让
+// sh 被 sleep 原地替换：SIGTERM 直接命中 sleep（无孤儿持管道），
+// stopHost 不必等 WaitDelay，测试从每轮收割 ~3s 降到毫秒级。
 func stubSSH(t *testing.T) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "stub-ssh")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// failSSH 生成一个立即退出的脚本，制造 ✗ 退避中的主机。
+func failSSH(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "fail-ssh")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 255\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -288,4 +301,173 @@ func TestForwardConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// hostPtr 取 map 中该主机的 fwdHost 指针，用于断言 refresh 是否换新。
+func hostPtr(m *ForwardManager, host string) *fwdHost {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.hosts[host]
+}
+
+// waitRunning 轮询直至 host 进入 Running（3s 上限），返回当时快照。
+func waitRunning(t *testing.T, m *ForwardManager, host string) ForwardState {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		for _, f := range m.List() {
+			if f.Host == host && f.Running {
+				return f
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s 应在 3s 内进入 Running, list=%+v", host, m.List())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitRestarts 轮询直至 host 的 Restarts 达到 n（3s 上限）——证明
+// supervisor 在真实地反复尝试。
+func waitRestarts(t *testing.T, m *ForwardManager, host string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		for _, f := range m.List() {
+			if f.Host == host && f.Restarts >= n {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s 的 Restarts 应达 %d, list=%+v", host, n, m.List())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// 全量 refresh：两台 Running 主机全部换新（指针替换），回到 Running 且
+// Restarts 清零、路径覆盖保留、配置文件不被改写。
+func TestForwardRefreshAll(t *testing.T) {
+	m := newTestManager(t)
+	defer m.Shutdown()
+	if err := m.Add("alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Add("beta:/run/user/1001/sudogate.sock"); err != nil {
+		t.Fatal(err)
+	}
+	waitRunning(t, m, "alpha")
+	waitRunning(t, m, "beta")
+	confBefore, err := os.ReadFile(m.confPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldA, oldB := hostPtr(m, "alpha"), hostPtr(m, "beta")
+
+	if err := m.Refresh(""); err != nil {
+		t.Fatalf("全量 Refresh 失败: %v", err)
+	}
+	if hostPtr(m, "alpha") == oldA || hostPtr(m, "beta") == oldB {
+		t.Fatal("Refresh 应为每台换入全新 supervisor")
+	}
+	if f := waitRunning(t, m, "alpha"); f.Restarts != 0 || f.RemotePath != defaultRemoteSock {
+		t.Fatalf("alpha 换新状态错误: %+v", f)
+	}
+	if f := waitRunning(t, m, "beta"); f.Restarts != 0 || f.RemotePath != "/run/user/1001/sudogate.sock" {
+		t.Fatalf("beta 换新状态错误（路径覆盖丢失?）: %+v", f)
+	}
+	confAfter, _ := os.ReadFile(m.confPath)
+	if !bytes.Equal(confBefore, confAfter) {
+		t.Fatalf("Refresh 不应改写配置: %q -> %q", confBefore, confAfter)
+	}
+}
+
+// 点名 refresh：只换目标台，其余主机完全不动（指针与 Running 保持）。
+func TestForwardRefreshNamed(t *testing.T) {
+	m := newTestManager(t)
+	defer m.Shutdown()
+	m.startHost("alpha", defaultRemoteSock)
+	m.startHost("beta", defaultRemoteSock)
+	waitRunning(t, m, "alpha")
+	waitRunning(t, m, "beta")
+	oldA, oldB := hostPtr(m, "alpha"), hostPtr(m, "beta")
+
+	// 带空白也应规范化命中
+	if err := m.Refresh(" alpha "); err != nil {
+		t.Fatal(err)
+	}
+	if hostPtr(m, "alpha") == oldA {
+		t.Fatal("alpha 应被换新")
+	}
+	if hostPtr(m, "beta") != oldB {
+		t.Fatal("beta 不应被动")
+	}
+	waitRunning(t, m, "alpha")
+}
+
+// ✗ 退避中的主机 refresh：换新后立即重试（Restarts 从 0 重新增长），
+// 而不是等旧退避的 5s 封顶周期。
+func TestForwardRefreshRevivesDead(t *testing.T) {
+	m := newTestManager(t)
+	m.sshCommand = failSSH(t)
+	defer m.Shutdown()
+	m.startHost("down", defaultRemoteSock)
+	waitRestarts(t, m, "down", 2) // 至少退避一轮，确认 ✗
+	old := hostPtr(m, "down")
+
+	if err := m.Refresh(""); err != nil {
+		t.Fatal(err)
+	}
+	if hostPtr(m, "down") == old {
+		t.Fatal("✗ 主机应被换新")
+	}
+	// 换新即 spawn：fail ssh 毫秒级退出，Restarts 很快从 0 重新计
+	waitRestarts(t, m, "down", 1)
+}
+
+// refresh 目标校验：未知主机报错并指引、非法参数报错、空列表全量 no-op。
+func TestForwardRefreshTargetErrors(t *testing.T) {
+	m := newTestManager(t)
+	defer m.Shutdown()
+	m.startHost("alpha", defaultRemoteSock)
+	if err := m.Refresh("nope"); err == nil || !strings.Contains(err.Error(), "forward list") {
+		t.Fatalf("未知主机应报错并指引: %v", err)
+	}
+	for _, bad := range []string{"a b", "host:", ":/only/path"} {
+		if err := m.Refresh(bad); err == nil {
+			t.Fatalf("Refresh(%q) 应报错", bad)
+		}
+	}
+	// 空配置下全量 refresh 为 no-op，不报错
+	empty := newTestManager(t)
+	defer empty.Shutdown()
+	if err := empty.Refresh(""); err != nil {
+		t.Fatalf("空配置全量 Refresh 应 no-op: %v", err)
+	}
+}
+
+// 并发 Refresh/Add/Remove/List 不死锁不竞态、无 supervisor 泄漏
+// （每个被换下的实例都被其换入者收割）。-race 检测。
+func TestForwardRefreshConcurrent(t *testing.T) {
+	m := newTestManager(t)
+	defer m.Shutdown()
+	m.startHost("x", defaultRemoteSock)
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = m.Refresh("x")
+			_ = m.Refresh("")
+			_ = m.Add("y")
+			_ = m.List()
+			_ = m.Remove("y")
+		}()
+	}
+	wg.Wait()
+	// 全部落定后 x 仍应活着并可再次换新
+	if err := m.Refresh("x"); err != nil {
+		t.Fatalf("并发后单台 Refresh 失败: %v", err)
+	}
+	waitRunning(t, m, "x")
 }

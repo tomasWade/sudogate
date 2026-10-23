@@ -57,7 +57,11 @@ sudogate-client）。前两者通常是同一台。构建需要 Go ≥ 1.24、ma
 openssl。下文 `<ssh-server>` 指 `user@host` 或 ssh config 里的别名。
 
 **1. 密钥对，一次**（任意第三方工具；带外保存——仓库永不存密钥，每台
-构建机需要同一对）：
+构建机需要同一对）。构建机的 `keys/` 丢失时必须带外找回原对，**禁止**
+重新生成：`make keys` 铸的是全新对，所有已部署的 client 全都连不上。
+（从部署的 server 二进制恢复：`go:embed` 原样存了文件，直接从可执行
+文件里抠出 `-----BEGIN PRIVATE KEY-----` 块，再 `openssl pkey -pubout`
+导出 `laptop.pub`。）
 
 ```bash
 mkdir -p keys
@@ -132,6 +136,7 @@ sudo -A <command>      # 真实使用
 
 ```bash
 sudogate-server forward list     # 每主机 ✓/✗、重启数、最近错误
+sudogate-server forward refresh  # 强制重建全部通道（refresh <host> 只重建一台）
 ```
 
 **不要**在 `~/.ssh/config` 里给目标主机配 `RemoteForward`。任何命中该块
@@ -455,6 +460,12 @@ flowchart LR
   ```
 
   永久修法见快速开始里的 `StreamLocalBindUnlink yes`。
+
+- **`forward list` 全 ✓ 但远端 `sudo -A` 不通，或某台反复 ✗ 卡退避** ——
+  强制重建：`sudogate-server forward refresh`（全部）或 `forward refresh
+  <host>`（单台）。`Running=✓` 只代表 ssh 进程活着：NAT 半开、远端 sshd
+  重启后隧道可能已死而进程仍在——"没退出"意味着退避重试永远不会触发，
+  只有换新进程能救。
 
 - **`sudo -A` 持续 `connection refused` 而 `forward list` 全 ✓** ——
   几乎可以断定是 `~/.ssh/config` 里残留的 sudogate `RemoteForward`：

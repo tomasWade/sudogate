@@ -52,7 +52,7 @@ func main() {
 		fs.Parse(os.Args[2:])
 		args := fs.Args()
 		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "用法: sudogate-server forward [-socket 路径] list|add <host>|remove <host>")
+			fmt.Fprintln(os.Stderr, "用法: sudogate-server forward [-socket 路径] list|add <host>|remove <host>|refresh [<host>]")
 			os.Exit(2)
 		}
 		os.Exit(server.RunForward(ctlPath(*socket), args))
@@ -150,6 +150,6 @@ func usage() {
   status   [-socket 路径] [--waybar]                        查看待批
   approve  -id ID [-socket 路径]                            从 stdin 读密码批准（测试用）
   deny     -id ID [-socket 路径]                            拒绝
-  forward  [-socket 路径] list|add <host>|remove <host>     管理专用转发通道
+  forward  [-socket 路径] list|add|remove|refresh [<host>]  管理专用转发通道
   popup    [-socket 路径] on|off|status                     桌面弹窗审批开关`)
 }

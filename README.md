@@ -63,7 +63,12 @@ the same box. Building needs Go ≥ 1.24, make, openssl. `<ssh-server>` below
 means `user@host` or its ssh-config alias.
 
 **1. Keypair, once** (any third-party tool; out of band — the repo never
-stores keys, every build machine needs the same pair):
+stores keys, every build machine needs the same pair). If a build machine
+loses `keys/`, recover the pair out of band — never regenerate it: `make
+keys` mints a fresh pair no deployed client can talk to. (Recovery from a
+deployed server binary: carve the `-----BEGIN PRIVATE KEY-----` block out of
+the executable — `go:embed` stores the file verbatim — then derive
+`laptop.pub` with `openssl pkey -pubout`.)
 
 ```bash
 mkdir -p keys
@@ -142,6 +147,7 @@ with backoff on failure, reaped when the server exits. Inspect at any time:
 
 ```bash
 sudogate-server forward list     # per-host ✓/✗, restart count, last error
+sudogate-server forward refresh  # rebuild all tunnels (refresh <host>: just one)
 ```
 
 **Do not** put `RemoteForward` in `~/.ssh/config` for the target host. Any
@@ -497,6 +503,13 @@ disconnects (Ctrl+C) cancels its own review immediately.
 
   For a permanent fix, see `StreamLocalBindUnlink yes` in
   [Quick Start](#quick-start).
+
+- **`forward list` shows ✓ but remote `sudo -A` is dead, or a host is stuck
+  in ✗ backoff** — force a rebuild: `sudogate-server forward refresh` (all
+  hosts) or `forward refresh <host>` (one). `Running=✓` only means the ssh
+  process is alive; after a NAT half-open drop or a remote sshd restart the
+  tunnel can be dead while the process lives — and since nothing exits, the
+  backoff retry never fires. Only a fresh process fixes it.
 
 - **`sudo -A` persistently `connection refused` while `forward list` is all ✓** —
   almost certainly a leftover sudogate `RemoteForward` in `~/.ssh/config`:
